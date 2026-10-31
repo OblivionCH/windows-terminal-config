@@ -34,9 +34,17 @@ $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull
 
 **Windows Terminal**：winget 可用时直接 `winget install Microsoft.WindowsTerminal`；不可用时从 GitHub 拉最新 msixbundle，连同 VCLibs 依赖一起用 Appx 装。两个都失败会明确报错并退出，不会留下半成品。
 
-**字体**：从 `ryanoasis/nerd-fonts` 下载 `Meslo.zip`，解压全部 ttf 到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`，写 `HKCU` 字体注册表项，再调 `AddFontResource` + `WM_FONTCHANGE` 通知系统。整个过程不需要管理员，也不需要重启。
+**字体**：从 `ryanoasis/nerd-fonts` 下载 `Meslo.zip`，解压后**只安装配置里实际用到的字体族**（读 `settings.json` 的 `font.face` 匹配，避免把 Meslo 全套二十多个文件都塞进系统），复制到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`，写 `HKCU` 字体注册表项，再调 `AddFontResource` + `WM_FONTCHANGE` 通知系统。不需要管理员，也不需要重启。
 
 不想自动做的话：`-SkipTerminal` 跳过装终端，`-SkipFont` 跳过装字体。
+
+### 国内网络
+
+脚本里所有 GitHub 下载都优先走 `gh-proxy.com` 镜像，失败才回退直连。原因很实际：直连 GitHub 经常是"龟速但不报错"，超时参数兜不住，会让人以为脚本卡死。
+
+下载统一交给系统自带的 `curl.exe` 而不是 `Invoke-WebRequest`——后者在 PowerShell 5.1 下处理大文件加镜像分块响应时会挂死。curl 因代理环境的证书链问题加了 `-k`，只影响本次下载，不改动系统信任设置。
+
+如果镜像失效，可以改 `setup.ps1` 里 `Get-RemoteFile` 的 `gh-proxy.com` 为其他加速站。
 
 ### 关于 WSL profile
 

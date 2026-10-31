@@ -94,18 +94,29 @@ function Invoke-InPS51 {
 
 function Get-RemoteFile {
     param([string]$Uri, [string]$OutFile)
-    # 直连 GitHub 在国内经常超时，失败时自动切到加速镜像
-    $attempts = @($Uri)
+    # 国内直连 GitHub 常年龟速甚至挂死（慢但不报错，超时兜不住），
+    # 所以 GitHub 链接优先走加速镜像，失败再回退直连。
+    # 下载统一交给系统自带的 curl.exe：Invoke-WebRequest 在 5.1 下处理
+    # 这种大文件 + 镜像分块响应会挂死。代理环境的证书链不被 curl 自带
+    # CA 认可，故用 -k 跳过校验（只影响本次下载，不改变系统信任设置）。
+    $attempts = @()
     if ($Uri -like 'https://github.com/*') { $attempts += ('https://gh-proxy.com/' + $Uri) }
+    $attempts += $Uri
 
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     $last = $null
     foreach ($u in $attempts) {
         try {
-            Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -TimeoutSec 600
+            if (Test-Path $curl) {
+                & $curl -k -L -s --fail --retry 2 --connect-timeout 20 -o $OutFile $u
+                if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and (Get-Item $OutFile).Length -gt 0) { return }
+                throw "curl 退出码 $LASTEXITCODE"
+            }
+            Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
             return
         } catch {
             $last = $_
-            Write-Note "下载失败（$($u.Substring(0, [Math]::Min(40, $u.Length)))...），换备用源重试"
+            Write-Note "下载失败，换备用源重试：$($_.Exception.Message)"
         }
     }
     throw $last
@@ -405,8 +416,21 @@ function Install-NerdFont {
     Get-RemoteFile -Uri 'https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip' -OutFile $zip
 
     Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $ttfs = Get-ChildItem $extract -Filter '*.ttf' -Recurse
+    $ttfs = @(Get-ChildItem $extract -Filter '*.ttf' -Recurse)
     if (-not $ttfs) { throw '压缩包里没有找到 ttf 文件' }
+
+    # 只安装配置里实际用到的字体族，避免把 Meslo 全套二十多个文件都塞进系统
+    $wanted = $null
+    try {
+        $cfg = Get-Content $RepoSettings -Raw -Encoding UTF8 | ConvertFrom-Json
+        $face = ($cfg.profiles.list | Where-Object { $_.font -and $_.font.face } | Select-Object -First 1).font.face
+        if ($face) { $wanted = ($face -replace '\s', '') }
+    } catch { }
+
+    if ($wanted) {
+        $matched = @($ttfs | Where-Object { ($_.BaseName -replace '\s', '') -like "$wanted*" })
+        if ($matched.Count -gt 0) { $ttfs = $matched }
+    }
 
     # 注册字体所需的 P/Invoke
     if (-not ('WinFont' -as [type])) {
@@ -428,7 +452,13 @@ public class WinFont {
     $installed = 0
     foreach ($f in $ttfs) {
         $dest = Join-Path $fontDir $f.Name
-        Copy-Item $f.FullName $dest -Force
+        try {
+            Copy-Item $f.FullName $dest -Force -ErrorAction Stop
+        } catch {
+            # 已加载的字体文件会被系统锁定，无法覆盖。沿用现有文件继续注册即可。
+            if (-not (Test-Path $dest)) { throw }
+            Write-Note "字体文件被占用，沿用已有文件：$($f.Name)"
+        }
         $regName = [IO.Path]::GetFileNameWithoutExtension($f.Name) + ' (TrueType)'
         New-ItemProperty -Path $regPath -Name $regName -Value $dest -PropertyType String -Force | Out-Null
         [void][WinFont]::AddFontResource($dest)
