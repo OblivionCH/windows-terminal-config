@@ -41,6 +41,17 @@
 .PARAMETER SkipApps
     不安装 packages.json 里的软件（只部署配置）。
 
+.PARAMETER Skip
+    跳过指定包（按 id，逗号分隔），例如 `-Skip wechat,obsidian`。
+    可以覆盖 optional 标记——连核心包也能临时不装，仅当次生效，不改仓库。
+
+.PARAMETER SkipOptional
+    跳过所有标记为 optional 的包。适合在受限机器上只装核心环境。
+
+.PARAMETER Group
+    只安装属于指定分组的包（逗号分隔），例如 `-Group dev,media`。
+    未分组的包（核心）始终保留。与 -Skip 叠加可做更精细的选择。
+
 .PARAMETER AppsOnly
     只装软件，不碰 Windows Terminal 配置。适合先把环境备好再单独调配置。
 
@@ -83,6 +94,15 @@
 
 .EXAMPLE
     .\setup.ps1 -Verify
+
+.EXAMPLE
+    .\setup.ps1 -Skip wechat,obsidian
+
+.EXAMPLE
+    .\setup.ps1 -SkipOptional
+
+.EXAMPLE
+    .\setup.ps1 -Group dev,media
 #>
 [CmdletBinding()]
 param(
@@ -93,6 +113,9 @@ param(
     [switch]$SkipWinget,
     [switch]$SkipScoop,
     [switch]$SkipApps,
+    [string]$Skip,
+    [switch]$SkipOptional,
+    [string]$Group,
     [switch]$AppsOnly,
     [switch]$ExportApps,
     [switch]$DryRun,
@@ -389,6 +412,50 @@ function Get-PackageManifest {
     }
 }
 
+# 包条目兼容两种写法：纯字符串（"git"）或带元数据的对象
+#（{"id":"git","optional":true,"group":"dev"}）。统一成带 id/optional/group
+# 的对象，安装与导出逻辑共用同一套。packages.json 因此可以逐步给包加标注，
+# 不用一次性全改；未标注的包退化成 optional=false、group=null 的核心包。
+function Get-PkgId {
+    param($Entry)
+    if ($Entry -is [string]) {
+        return [pscustomobject]@{ id = $Entry; optional = $false; group = $null }
+    }
+    if ($Entry -is [PSCustomObject] -or $Entry -is [hashtable]) {
+        $id = if ($Entry.id) { [string]$Entry.id } else { $null }
+        if (-not $id) { return $null }
+        $opt = $false
+        if ($Entry.PSObject.Properties.Name -contains 'optional') { $opt = [bool]$Entry.optional }
+        $grp = if ($Entry.group) { [string]$Entry.group } else { $null }
+        return [pscustomobject]@{ id = $id; optional = $opt; group = $grp }
+    }
+    return $null
+}
+
+function Normalize-Manifest {
+    param($Manifest)
+    if (-not $Manifest) { return $Manifest }
+    $scoop = @()
+    if ($Manifest.scoop)  { $scoop  = @($Manifest.scoop  | ForEach-Object { $p = Get-PkgId $_; if ($p) { $p } }) }
+    $winget = @()
+    if ($Manifest.winget) { $winget = @($Manifest.winget | ForEach-Object { $p = Get-PkgId $_; if ($p) { $p } }) }
+    $Manifest.scoop  = $scoop
+    $Manifest.winget = $winget
+    return $Manifest
+}
+
+# 导出时把带标注的包还原成对象，没标注的保持纯字符串，避免无谓的噪音。
+function Format-Pkg {
+    param($Id, $Meta)
+    if ($Meta -and ($Meta.optional -or $Meta.group)) {
+        $o = [pscustomobject]@{ id = $Id }
+        if ($Meta.optional) { $o | Add-Member -NotePropertyName optional -NotePropertyValue $true }
+        if ($Meta.group)   { $o | Add-Member -NotePropertyName group   -NotePropertyValue $Meta.group }
+        return $o
+    }
+    return $Id
+}
+
 function Get-ScoopRoot {
     if ($env:SCOOP -and (Test-Path $env:SCOOP)) { return $env:SCOOP.TrimEnd('\') }
     $c = Get-Command scoop -ErrorAction SilentlyContinue
@@ -535,7 +602,18 @@ function Install-ScoopPackages {
                   Select-Object -ExpandProperty Name)
     }
 
-    $todo = @($Manifest.scoop | Where-Object { $have -notcontains $_ })
+    # 应用跳过规则：-Skip 手动指定、-SkipOptional 跳过可选包、-Group 仅保留指定分组
+    # （未分组的包视为核心，始终保留）。仅当次生效，不改仓库。
+    $skipSet  = if ($Skip)  { @($Skip  -split '[,;]') | ForEach-Object { $_.Trim() } } else { @() }
+    $groupSet = if ($Group) { @($Group -split '[,;]') | ForEach-Object { $_.Trim() } } else { @() }
+    $targets = @($Manifest.scoop | Where-Object {
+        if ($skipSet  -contains $_.id) { return $false }
+        if ($SkipOptional -and $_.optional) { return $false }
+        if ($groupSet.Count -gt 0 -and $_.group -and ($groupSet -notcontains $_.group)) { return $false }
+        return $true
+    })
+
+    $todo = @($targets | Where-Object { $have -notcontains $_.id })
     if ($todo.Count -eq 0) {
         Write-Ok "scoop 软件已全部安装（$($have.Count) 个）"
         return
@@ -543,7 +621,7 @@ function Install-ScoopPackages {
 
     Write-Note "scoop 待安装 $($todo.Count) 个（已装 $($have.Count) 个）"
     if ($DryRun) {
-        Write-Note ("将安装：{0}" -f ($todo -join ', '))
+        Write-Note ("将安装：{0}" -f (($todo | ForEach-Object { $_.id }) -join ', '))
         return
     }
 
@@ -551,13 +629,13 @@ function Install-ScoopPackages {
     $i = 0
     foreach ($a in $todo) {
         $i++
-        Write-Host ("    [{0}/{1}] {2}" -f $i, $todo.Count, $a) -ForegroundColor DarkGray
-        $log = & scoop install $a 2>&1 | Out-String
+        Write-Host ("    [{0}/{1}] {2}" -f $i, $todo.Count, $a.id) -ForegroundColor DarkGray
+        $log = & scoop install $a.id 2>&1 | Out-String
         # 装没装上看 current 链接，不看退出码（scoop 是 PS 函数，退出码不可靠）。
         # 注意不能只判 apps\<name> 目录存不存在——装失败同样会留下版本目录，
         # 那样会把 gh / zstd 这类失败品报成成功。
-        if (-not (Test-Path (Join-Path $adir "$a\current"))) {
-            $failed += $a
+        if (-not (Test-Path (Join-Path $adir "$($a.id)\current"))) {
+            $failed += $a.id
             $tail = ($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' / '
             if ($tail) { Write-Host "        $tail" -ForegroundColor DarkYellow }
         }
@@ -578,17 +656,28 @@ function Install-WingetPackages {
     $winget = Find-Winget
     if (-not $winget) { Write-Note 'winget 不可用，跳过 winget 软件'; return }
 
+    # 应用跳过规则（同 Install-ScoopPackages）
+    $skipSet  = if ($Skip)  { @($Skip  -split '[,;]') | ForEach-Object { $_.Trim() } } else { @() }
+    $groupSet = if ($Group) { @($Group -split '[,;]') | ForEach-Object { $_.Trim() } } else { @() }
+    $targets = @($Manifest.winget | Where-Object {
+        if ($skipSet  -contains $_.id) { return $false }
+        if ($SkipOptional -and $_.optional) { return $false }
+        if ($groupSet.Count -gt 0 -and $_.group -and ($groupSet -notcontains $_.group)) { return $false }
+        return $true
+    })
+
     if ($DryRun) {
-        Write-Note ("将安装 {0} 个 winget 包：{1}" -f $Manifest.winget.Count, ($Manifest.winget -join ', '))
+        Write-Note ("将安装 {0} 个 winget 包：{1}" -f $targets.Count, (($targets | ForEach-Object { $_.id }) -join ', '))
         return
     }
 
     $failed  = @()
     $skipped = 0
     $i = 0
-    foreach ($id in $Manifest.winget) {
+    foreach ($p in $targets) {
         $i++
-        Write-Host ("    [{0}/{1}] {2}" -f $i, $Manifest.winget.Count, $id) -ForegroundColor DarkGray
+        $id = $p.id
+        Write-Host ("    [{0}/{1}] {2}" -f $i, $targets.Count, $id) -ForegroundColor DarkGray
         # --no-upgrade 很关键：否则已装的包会被当成"升级"，遇到正在运行的程序
         # 会报 0x80070020 文件占用而失败，还会白白耗掉几分钟。
         & $winget install --id $id -e --silent --no-upgrade `
@@ -722,20 +811,28 @@ function Export-PackageManifest {
 
     # winget export 只能识别"它自己装过"的包，用安装程序手动装的（Chrome、
     # Firefox、夸克、迅雷之类）会整个丢失。所以和旧清单取并集，保住手工补的条目。
+    # 保留旧的 optional/group 标注：导出只同步"装了什么"，不覆盖用户的分类标注，
+    # 否则每次 -ExportApps 都会把手动加的 optional 标记冲掉。
+    $oldMetaScoop  = @{}
+    $oldMetaWinget = @{}
     $oldIds = @()
     if (Test-Path $PackageManifest) {
         try {
             $old = Get-Content $PackageManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($old.winget) { $oldIds = @($old.winget) }
+            if ($old.scoop)  { foreach ($e in @($old.scoop))  { $p = Get-PkgId $e; if ($p -and ($p.optional -or $p.group)) { $oldMetaScoop[$p.id]  = @{ optional = $p.optional; group = $p.group } } } }
+            if ($old.winget) { foreach ($e in @($old.winget)) { $p = Get-PkgId $e; if ($p -and ($p.optional -or $p.group)) { $oldMetaWinget[$p.id] = @{ optional = $p.optional; group = $p.group } } }
+                                $oldIds = @($old.winget) }
         } catch { }
     }
     $onlyOld = @($oldIds | Where-Object { $wingetIds -notcontains $_ })
     $wingetIds = @(($wingetIds + $oldIds) | Sort-Object -Unique)
 
+    $scoopOut  = @($apps      | ForEach-Object { Format-Pkg $_ $oldMetaScoop[$_] })
+    $wingetOut = @($wingetIds | ForEach-Object { Format-Pkg $_ $oldMetaWinget[$_] })
     $obj = [pscustomobject]@{
         buckets = $buckets
-        scoop   = $apps
-        winget  = $wingetIds
+        scoop   = $scoopOut
+        winget  = $wingetOut
     }
     $json = $obj | ConvertTo-Json -Depth 6
     [IO.File]::WriteAllText($PackageManifest, $json, (New-Object System.Text.UTF8Encoding $false))
@@ -834,7 +931,7 @@ Initialize-Network -Proxy $Proxy
 # 先读清单，决定到底需不需要 winget。
 # 清单里没有 winget 条目时，本机就只保留 scoop 一套工具链，不白下 300 MB。
 $mf = $null
-if (-not $SkipApps) { $mf = Get-PackageManifest }
+if (-not $SkipApps) { $mf = Get-PackageManifest; if ($mf) { $mf = Normalize-Manifest $mf } }
 $needWinget = ($mf -and @($mf.winget).Count -gt 0)
 
 if (-not $SkipWinget) {
@@ -971,12 +1068,15 @@ if ($Elevate -and -not $canLink -and -not $Copy) {
         # 把当前用到的开关原样带过去，避免提权后变成"裸跑"
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
         foreach ($s in 'Copy', 'SkipBackground', 'SkipFont', 'SkipTerminal', 'SkipWinget',
-                       'SkipScoop', 'SkipApps', 'AppsOnly', 'PruneProfiles', 'SyncProfiles', 'Force') {
+                       'SkipScoop', 'SkipApps', 'AppsOnly', 'SkipOptional',
+                       'PruneProfiles', 'SyncProfiles', 'Force') {
             $v = Get-Variable -Name $s -ValueOnly -ErrorAction SilentlyContinue
             if ($v) { $argList += "-$s" }
         }
         $argList += '-Elevate'
-        if ($Proxy) { $argList += @('-Proxy', $Proxy) }
+        if ($Proxy)  { $argList += @('-Proxy', $Proxy) }
+        if ($Skip)   { $argList += @('-Skip', $Skip) }
+        if ($Group)  { $argList += @('-Group', $Group) }
         Start-Process powershell -Verb RunAs -ArgumentList $argList
         exit 0
     }
