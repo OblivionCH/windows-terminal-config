@@ -86,6 +86,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 - **winget export 有盲区**：它只认自己装过的包，用安装程序手动装的（Chrome、Firefox、夸克网盘、迅雷）完全识别不出来。所以导出时会把**旧清单里的条目并回去**，并在输出里列出「识别不出但保留」的几项——看到这个提示不用慌，那是正常的
 - **卸载不会自动从清单里消失**：因为是并集，手工删条目就行
 
+同一个盲区在安装时也有副作用：这几项 winget 认不出「已装」，会重新跑一遍安装程序。Chrome、迅雷的安装器一般会自己识别成"已存在"然后跳过或修复，但确实会弹一次窗口。只想装缺失的、不想动已装的，用 `-DryRun` 先看清单，或临时把这几项注释掉。
+
 ### 装不上怎么办
 
 - **scoop 包失败** —— 多半是网络。单个重试：`scoop install <名字>`；bucket 没配齐就重跑 `setup.ps1`
