@@ -1,74 +1,144 @@
-# Windows Terminal 配置 + 软件环境
+# Windows Terminal 配置 + 软件环境（dotfiles）
 
-我的 Windows Terminal 设置和常用软件清单，一条命令复刻到任意一台 Windows 机器——配置、字体、背景图、scoop bucket、几十个软件全都能一次性到位。
+一套**可复现的 Windows 开发环境**：把我的 Windows Terminal 设置、终端字体、背景图，以及几十个常用软件的清单，**一条命令**复刻到任意一台 Windows 机器上——配置、字体、bucket、软件全部一次性到位，不用一项项手动装。
 
-## 仓库内容
+> 设计哲学：**可复现 + 有意晋升**。
+> - 配置通过**符号链接**直接指向仓库文件，本机在 WT 里改设置就等于改仓库，靠 `git diff` 就能看到。
+> - 软件清单（`packages.json`）是「标准基线」，只有显式 `sync.ps1 -Push` / `setup.ps1 -ExportApps` 才会改动它，随手微调不会污染可复用的基线。
 
-| 路径 | 说明 |
+---
+
+## 一、这个仓库是做什么的
+
+| 目标 | 说明 |
 | --- | --- |
-| `settings.json` | 主配置（主题、字体、快捷键、配色方案、profile 列表） |
-| `assets/packages.json` | 软件清单：scoop bucket / scoop 软件 / winget 软件 |
-| `assets/2.jpg` | 终端背景图 |
-| `assets/fonts/` | Meslo Nerd Font（4 个 ttf，安装时无需联网） |
-| `assets/scoop-config.json` | Scoop 配置（已脱敏，不含 token） |
-| `setup.ps1` | 一键部署脚本 |
-| `update.ps1` | 一键更新脚本（scoop + winget 统一入口） |
-| `sync.ps1` | git 拉取 / 推送的便捷封装 |
-| `lib/common.ps1` | 三个脚本共用的输出函数（Write-Step / Ok / Note / Bad / Indented） |
-| `lib/net.ps1` | 三个脚本共用的网络处理：代理探测、镜像改写、GitHub API、下载、git 镜像重试 |
+| 复刻终端配置 | 主题、字体、快捷键、配色方案、profile 列表，落盘成本机配置（符号链接优先，无权限则复制） |
+| 复刻软件环境 | 自动装好 scoop + winget 两套包管理器，再按清单装齐 41 个 scoop 包 + 25 个 winget 包 |
+| 自动补齐依赖 | 缺 winget / git / scoop / Windows Terminal 任何一个，脚本自己装好 |
+| 网络自适应 | 有代理用代理，没有就自动走 gh-proxy 镜像；中文 Windows 下强制 UTF-8，不受系统代码页影响 |
+| 可维护 | `update.ps1` 统一看/升两边更新；`sync.ps1` 包一层 git 操作；`-ExportApps` 把本机实况导回清单 |
 
-## 在新机器上部署
+**适用人群**：经常在新机器上搭环境的人；想把自己的「标准工具箱」版本化管理的人。
 
-PowerShell 里执行一行（全新系统也能跑，不需要预装 git）：
+---
+
+## 二、在什么环境下工作
+
+| 项 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 / 11（x64） |
+| PowerShell | 系统自带的 **5.1** 即可跑完整流程；也兼容 **PowerShell 7**。Appx 相关操作在 PS7 下会自动转交 5.1 子进程 |
+| 管理员权限 | **可选**。建符号链接需要 `SeCreateSymbolicLinkPrivilege`——开启开发者模式并重新登录，或用管理员。都没有时脚本自动退回复制模式（本机改动不会自动进仓库）。`setup.ps1 -Elevate` 可一键提权 |
+| 网络 | 三种都支持：① 有可用代理；② 无代理但能直连镜像；③ 完全离线（字体已随仓库内置，软件安装仍需联网）。代理**绝不写进任何配置**，只在本次运行内用环境变量带 |
+| 区域设置 | 中文 / 日文 / 英文均可。脚本 `.ps1` 均带 UTF-8 BOM，且运行时强制 `Get-Content`/`Set-Content`/`Out-File` 走 UTF-8，子进程输出也切 UTF-8，中文 Windows 不会乱码 |
+
+> 全新系统也能跑：引导命令不依赖预装 git——没有 git 就先用系统自带 `curl.exe` 拉 `archive zip`，展开后再跑 `setup.ps1`（内部会装好 git）。
+
+---
+
+## 三、怎么部署
+
+### 方式 A：全新机器（无需预装 git）
+
+PowerShell 里执行一行（首次部署推荐）：
 
 ```powershell
 $d="$env:USERPROFILE\dotfiles\windows-terminal";$u="https://github.com/OblivionCH/windows-terminal-config/archive/refs/heads/main.zip";if(Test-Path "$d\setup.ps1"){if(Get-Command git -ErrorAction SilentlyContinue){git -C $d pull}}else{$z="$env:TEMP\wtcfg.zip";$t="$env:TEMP\wtcfg";foreach($s in @("https://gh-proxy.com/$u",$u)){& "$env:SystemRoot\System32\curl.exe" -k -L -s --fail -o $z $s;if((Test-Path $z) -and (Get-Item $z).Length -gt 0){break}};Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue;Expand-Archive $z $t -Force;New-Item -ItemType Directory $d -Force|Out-Null;Copy-Item "$t\windows-terminal-config-main\*" $d -Recurse -Force};powershell -NoProfile -ExecutionPolicy Bypass -File "$d\setup.ps1"
 ```
 
-已经装过 git 的话，用短一点的版本（能 `git pull` 增量更新）：
+### 方式 B：已装 git（可增量更新）
 
 ```powershell
 $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull}else{git clone https://github.com/OblivionCH/windows-terminal-config.git $d}; powershell -NoProfile -ExecutionPolicy Bypass -File "$d\setup.ps1"
 ```
 
-想先看看会装什么、不动系统：
+### 先看会装什么、不动系统
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\windows-terminal\setup.ps1" -DryRun
 ```
 
-脚本依次完成：
+### 部署流程（脚本自动完成 12 步）
 
-1. **winget** —— 没有就自动下载安装（msixbundle + VCLibs 依赖，用 5.1 的 Appx 装）
-2. **git** —— 没有就先装。scoop 的 bucket 本质是 git 仓库，没 git 连 bucket 都加不了
-3. **scoop** —— 没有就自动安装，并把仓库里的配置合并进去（只补缺失项，不动本机已有的 token / proxy）
-4. **scoop bucket** —— 按清单配齐 7 个：`main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `dorado` / `java`，不用手动一个个 `bucket add`。已存在的会顺手核对地址（仓库搬家后自动改 remote）
-5. **scoop 软件** —— 装清单里的 41 个命令行工具和应用，已装的自动跳过
-6. **winget 软件** —— 装 scoop 里没有的 25 个（浏览器、微信生态、办公、驱动类工具等）
-7. **Windows Terminal** —— 没装就自动安装。优先 winget，回退官方 msixbundle
-8. **定位配置目录** —— Store 版 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState`，预览版走 `...TerminalPreview...`，非 Store 便携版走 `%LOCALAPPDATA%\Microsoft\Windows Terminal`
-9. **备份并落地配置** —— 原文件存为 `settings.json.bak-<时间戳>`，本机配置换成指向仓库文件的符号链接（无权限时退回复制模式）
+1. **winget** —— 没有就自动装（msixbundle + VCLibs 依赖，用 5.1 的 Appx 装）
+2. **git** —— 没有就先装（scoop 的 bucket 本质是 git 仓库，没 git 连 bucket 都加不了）
+3. **scoop** —— 没有就自动装，并把仓库里的 scoop 配置合并进去（**只补缺失项**，不动本机已有的 `gh_token` / `proxy`）
+4. **scoop bucket** —— 按清单配齐 7 个；已存在的会核对地址（仓库搬家后自动改 remote）
+5. **scoop 软件** —— 装清单里的包，已装的自动跳过
+6. **winget 软件** —— 装 scoop 里没有的包
+7. **Windows Terminal** —— 没装就自动装（winget 优先，回退官方 msixbundle）
+8. **定位配置目录** —— Store 版 / 预览版 / 非 Store 便携版三种形态自动探测
+9. **备份并落地配置** —— 原文件存为 `settings.json.bak-<时间戳>`，本机配置换成指向仓库的符号链接（无权限退回复制）
 10. **背景图** —— 复制到 `%USERPROFILE%\Pictures\2.jpg`
-11. **字体** —— 优先用仓库内置的 ttf，仓库缺失才联网下载兜底
-12. **WSL profile** —— 对比宿主机实际安装的发行版，报告差异
+11. **字体** —— 优先仓库内置 ttf，缺失才联网下载兜底
+12. **WSL profile** —— 对比宿主机实际发行版，报告差异
 
-最后重启 Windows Terminal 生效。
+最后**重启 Windows Terminal** 生效。
 
-## 软件清单 `assets/packages.json`
+### 常用开关
+
+```powershell
+.\setup.ps1 -DryRun            # 只看会装什么，不动系统
+.\setup.ps1 -AppsOnly          # 只装软件，不碰 WT 配置
+.\setup.ps1 -SkipApps          # 不装软件，只部署配置
+.\setup.ps1 -SkipWinget        # 跳过 winget（只留 scoop 一套）
+.\setup.ps1 -SkipScoop         # 跳过 scoop
+.\setup.ps1 -SkipTerminal      # 不自动装 Windows Terminal
+.\setup.ps1 -SkipFont          # 不装 Nerd Font
+.\setup.ps1 -SkipBackground    # 不复制背景图
+.\setup.ps1 -Proxy 127.0.0.1:7897   # 手动指定代理
+.\setup.ps1 -Elevate           # 提权重跑（符号链接 / 多数 winget 包需要）
+```
+
+#### 按需裁剪软件（仅当次生效，不改仓库）
+
+一键安装时如果某些软件你不想装，可以临时跳过，不影响「标准基线」本身：
+
+```powershell
+.\setup.ps1 -Skip wechat,obsidian              # 跳过指定包（按 id，逗号分隔）
+.\setup.ps1 -SkipOptional                        # 跳过所有标记为 optional 的包
+.\setup.ps1 -Group dev,media                     # 只装指定分组（未分组的核心包始终保留）
+```
+
+- 包条目在 `packages.json` 里兼容两种写法：纯字符串 `"git"`，或带标注的对象 `{"id":"git","optional":true,"group":"dev"}`
+- `optional` 只影响 `-SkipOptional`，**默认安装仍装全部**
+- `-Group` 会保留未分组的「核心包」，所以 `-Group dev` = 核心 + dev，不会把基础环境剔掉
+- `-ExportApps` 导出时会保留你已有的 `optional`/`group` 标注，不覆盖人工分类
+
+---
+
+## 四、部署了哪些内容
+
+仓库结构：
+
+| 路径 | 说明 |
+| --- | --- |
+| `settings.json` | 主配置（主题、字体、快捷键、配色方案、profile 列表），落地为符号链接 |
+| `assets/packages.json` | 软件清单：7 个 bucket + 41 个 scoop 包 + 25 个 winget 包（含 `optional`/`group` 标注） |
+| `assets/2.jpg` | 终端背景图 |
+| `assets/fonts/` | Meslo Nerd Font（4 个 ttf，安装时无需联网） |
+| `assets/scoop-config.json` | Scoop 配置（已脱敏，不含 token） |
+| `setup.ps1` | 一键部署脚本 |
+| `update.ps1` | 一键更新脚本（scoop + winget 统一入口） |
+| `sync.ps1` | git 拉取 / 推送的便捷封装（带复核闸门） |
+| `lib/common.ps1` | 三脚本共用的输出函数 |
+| `lib/net.ps1` | 三脚本共用的网络处理（代理探测、镜像改写、GitHub API、下载、git 镜像重试） |
+
+### 软件清单 `assets/packages.json`
 
 ```json
 {
   "buckets": [ { "name": "extras", "source": "https://github.com/ScoopInstaller/Extras" } ],
-  "scoop":   [ "7zip", "git", "neovim", "..." ],
-  "winget":  [ "Google.Chrome", "Microsoft.VisualStudioCode", "..." ]
+  "scoop":  [ "7zip", { "id": "Inkscape", "optional": true, "group": "media" }, "..." ],
+  "winget": [ "Google.Chrome", { "id": "Tencent.TencentDocs", "optional": true, "group": "office" }, "..." ]
 }
 ```
 
 三段各管一件事：
 
-- **`buckets`** —— 先配仓库，再装软件。缺哪个 bucket 就 `scoop bucket add`，已有的跳过
-- **`scoop`** —— scoop 能覆盖的全部走这里，安装到 `%SCOOP%`，不需要管理员权限
-- **`winget`** —— scoop 里没有的走 winget，覆盖浏览器、微信/飞书/豆包、PDF24、Quicker 这类
+- **`buckets`** —— 先配仓库，再装软件。缺哪个就 `scoop bucket add`，已有的跳过
+- **`scoop`** —— scoop 能覆盖的全部走这里，装到 `%SCOOP%`，不需要管理员
+- **`winget`** —— scoop 里没有的走 winget，覆盖浏览器、微信/飞书/豆包、PDF24、Quicker 等
 
 ### 配了哪 7 个 bucket
 
@@ -82,83 +152,87 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 | `dorado` | 中文软件：QQ NT、网易云、钉钉、飞书、企业微信、阿里云盘、B 站 |
 | `java` | 多版本 JDK：Temurin、Zulu、Corretto、GraalVM |
 
-**为什么不放 `kkzzhizhou/scoop-apps`**：那个聚合库有 14903 个 manifest、33.7 MB，是其他所有 bucket 加起来的三倍多，但实际只贡献了 4 个包（Bandicam、Dropbox、PixPin、TIM）。其中 PixPin 在 `dorado` 里就有，另外 3 个改走 winget 了，而且它和 dorado 已经出现同名包冲突。删掉之后 `scoop update` 明显变快。要装回来一条命令：`scoop bucket add apps https://github.com/kkzzhizhou/scoop-apps`。
+**为什么不放 `kkzzhizhou/scoop-apps`**：那个聚合库有 14903 个 manifest、33.7 MB，是其他所有 bucket 加起来的三倍多，但实际只贡献了 4 个包，且和 `dorado` 已出现同名冲突。删掉后 `scoop update` 明显变快。要装回：`scoop bucket add apps https://github.com/kkzzhizhou/scoop-apps`。
 
-**为什么不放 `nerd-fonts`**：这个 bucket 有 367 个 manifest，全是各种 Nerd Font 变体。配置里只用到 `MesloLGLDZ Nerd Font Mono` 一个族，而 4 个 ttf 已经随仓库内置（`assets/fonts/`），装字体根本不经过 scoop。之前清单里那三个 `CascadiaCode-NF` / `CascadiaCode-NF-Mono` / `Mononoki-NF` 一共 206 MB，配置里一次都没引用过，已移除。要装某个 Nerd Font 时再加：`scoop bucket add nerd-fonts`。
+**为什么不放 `nerd-fonts`**：367 个 manifest 全是字体变体，配置只用 `MesloLGLDZ Nerd Font Mono` 一个族，而 4 个 ttf 已随仓库内置。之前清单里那三个 `CascadiaCode-NF*` 共 206 MB，配置一次没引用，已移除。
 
-**判断"装没装"的方式**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 这个链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装会返回 97 或 `0x8A150061` 直接跳过。
+**判断「装没装」**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装返回 `97` 或 `0x8A150061` 直接跳过。`--no-upgrade` 很关键——不加的话 winget 会把「已安装」当「可升级」，遇到运行中的程序报 `0x80070020` 文件占用失败。
 
-`--no-upgrade` 这个参数很关键。不加的话 winget 会把"已安装"当成"可以升级"，遇到正在运行的程序就报 `0x80070020` 文件占用失败，还会白白耗掉几分钟。
+---
 
-## 网络：有代理就用，没有就走镜像
+## 五、维护清单（把仓库跟上本机）
 
-代理只在自己机器上有，而且不常开。所以**代理绝不写进任何配置**，只在本次运行内用环境变量带（git / curl / scoop 都认这个变量），进程结束就没了。
-
-脚本启动时先判断网络，规则是：
-
-1. 候选代理来源：`-Proxy` 参数 → `HTTPS_PROXY` 等环境变量 → 系统代理设置
-2. 逐个实测：先 TCP 连端口，**再真的发一次请求到 github.com**
-3. 通得过 → 本次运行全走它
-4. 通不过 → 自动切 gh-proxy 镜像
-
-第二步不能省。常见两种误判：代理软件关了但注册表里还留着上次的地址；或者端口开着却连不上 GitHub（只代理内网的、要认证的、某些工具注入的代理）。只测端口的话会把它们当成可用代理，结果所有下载都卡死。
-
-镜像模式下：
-
-- bucket 的 `git clone` 走 `https://gh-proxy.com/https://github.com/...`（实测支持 git 协议）
-- 脚本自己的下载走镜像，失败回退直连
-- 查最新版本用的 `api.github.com`、取 `install.ps1` 用的 `raw.githubusercontent.com` 也一并改写（实测这两个域名走 gh-proxy 都返回 200）。**这一步是必须的**：没有代理时直连 `api.github.com` 基本不通，只镜像 `github.com` 的话，装 winget / git / Windows Terminal 时查版本会静默退回内置版本号
-- 装 scoop 时先试官方 `get.scoop.sh`，失败就从镜像拉 `ScoopInstaller/Install` 的 `install.ps1` 直接跑
-- 导出的 `packages.json` 会把镜像前缀剥掉，不会把镜像地址固化进仓库
-
-`sync.ps1` 也一样：`git pull` / `push` 直连失败后会自动用 git 的进程级 `insteadOf` 改走镜像重试一次，不需要手工设代理。
-
-手动指定：`.\setup.ps1 -Proxy 127.0.0.1:7897`。
-
-**镜像管不到的部分**：`scoop install` 时下载安装包用的是 manifest 里写的原始地址（多数是 GitHub Releases），没有代理还是会慢。这种时候要么开代理，要么临时用 `justorez/scoop-cn` 这类把下载地址换成国内源的镜像库。
-
-### 维护清单
-
-装/卸了软件之后，让仓库跟上：
+装/卸了软件之后：
 
 ```powershell
-.\setup.ps1 -ExportApps
+.\setup.ps1 -ExportApps     # 扫本机实况重写 packages.json
+git diff assets/packages.json
+.\sync.ps1 -Push            # 复核并提交（见下方 sync 复核闸门）
 ```
-
-它会扫本机实际情况重写 `packages.json`，然后 `.\sync.ps1 -Push` 提交。
 
 三个已知取舍：
 
-- **winget export 有盲区**：它只认自己装过的包，用安装程序手动装的（Chrome、Firefox、夸克网盘、迅雷）完全识别不出来。所以导出时会把**旧清单里的条目并回去**，并在输出里列出「识别不出但保留」的几项——看到这个提示不用慌，那是正常的
-- **卸载不会自动从清单里消失**：因为是并集，手工删条目就行
-- **bucket 没了的应用会被跳过**：如果某个应用当初装的 bucket 已经不在清单里、别的 bucket 也没有同名包，导出时不会写进 `scoop` 段（写进去在别的机器也装不回来），而是单独列出来提醒你
+- **winget export 有盲区**：它只认自己装过的包，用安装程序手动装的（Chrome、Firefox、夸克、迅雷）识别不出。导出时会把**旧清单条目并回去**，输出里列出「识别不出但保留」的项——正常，不用慌
+- **卸载不会自动从清单消失**：因为是并集，手工删条目即可
+- **bucket 已不在清单的应用会被跳过**：若当初装的 bucket 已移除、别的 bucket 也没有同名包，导出时不写进 `scoop` 段（写了在别的机器也装不回），而是单独提醒你
 
-同一个盲区在安装时也有副作用：这几项 winget 认不出「已装」，会重新跑一遍安装程序。Chrome、迅雷的安装器一般会自己识别成"已存在"然后跳过或修复，但确实会弹一次窗口。只想装缺失的、不想动已装的，用 `-DryRun` 先看清单，或临时把这几项注释掉。
+---
 
-### 装不上怎么办
+## 六、更新软件
 
-- **scoop 包失败** —— 多半是网络。单个重试：`scoop install <名字>`；bucket 没配齐就重跑 `setup.ps1`
-- **winget 包失败** —— 多数 winget 包需要管理员权限，用 `.\setup.ps1 -Elevate` 提权重跑，或手动 `winget install --id <ID> -e`
-- **两边都没有的** —— 比如向日葵、Watt Toolkit（后者只在 msstore 源里），脚本不会碰，自己装
+`update.ps1` 是更新软件的唯一入口，默认只报告不改动：
 
-## 自动安装的边界
+```powershell
+.\update.ps1          # 看 scoop / winget 各有哪些更新，不动系统
+.\update.ps1 -Apply   # 真的升级（winget 部分可能需要管理员）
+```
 
-**winget**：`DesktopAppInstaller` 的 msixbundle 约 207 MB，依赖包 93 MB。查 GitHub API 拿最新版本，失败时用内置版本号 `v1.29.380`。Appx 操作全部转交 5.1 子进程。
+- **scoop 侧** —— 先 `scoop update` 刷新自身和 7 个 bucket，再列可升级项
+- **winget 侧** —— 列可升级项
+- **汇总** —— 两边各几个可更新；`-Apply` 升完会再扫一遍，把「程序正在运行 / 需要管理员」没升上去的单独列出
 
-**git**：优先 `winget install Git.Git`；winget 不可用时下载 MinGit 便携版 zip 解压到 `%LOCALAPPDATA%\Programs\MinGit`，写进用户 PATH，免安装免管理员。
+自动摘掉两类「看着像可更新、其实升不了」的条目：
 
-**scoop**：跑官方 `get.scoop.sh` 安装脚本。装完刷新当前会话 PATH，再把 `assets/scoop-config.json` 合并进 `~/.config/scoop/config.json`。**只补本机没有的键**——`gh_token`、`proxy` 这类本机专属项绝不会被覆盖。
+| 类别 | 特征 | 处理 |
+| --- | --- | --- |
+| 装失败的残留 | 有版本目录但没有 `current` 链接 | 提示 `scoop uninstall <名>` 后重装 |
+| 孤儿 | `install.json` 里记的 bucket 已移除，且没有任何现存 bucket 有同名包 | 提示换 winget 或卸载 |
 
-**Windows Terminal**：winget 可用就 `winget install Microsoft.WindowsTerminal`；不可用则拉 msixbundle + VCLibs 用 Appx 装。
+---
 
-**字体**：仓库里带 4 个 Meslo ttf，直接复制 + 写注册表 + `AddFontResource`，全程离线。仓库没有字体文件时才回退到从 `ryanoasis/nerd-fonts` 下载 `Meslo.zip`（63 MB），并只提取配置里 `font.face` 对应的族。
+## 七、日常同步（sync.ps1）
 
-跳过某些步骤：`-SkipApps`（不装软件）、`-SkipWinget`、`-SkipScoop`、`-SkipTerminal`、`-SkipFont`、`-SkipBackground`。
-只装软件不碰配置：`-AppsOnly`。只看不装：`-DryRun`。指定代理：`-Proxy 127.0.0.1:7897`。
+```powershell
+.\sync.ps1                 # 看当前状态
+.\sync.ps1 -Pull           # 拉取更新并校验链接
+.\sync.ps1 -Push           # 提交并推送本机改动（带复核闸门）
+.\sync.ps1 -Verify         # 只检查链接是否还有效
+```
 
-## WSL profile 同步
+**`-Push` 复核闸门**：推送前会展示 `git diff`，并扫描三类「可能仅属于本机」的改动——
+本机用户绝对路径（`C:\Users\...`）、窗口尺寸微调（`initialCols`/`initialRows`）、本机设备名（`DESKTOP-`/`LAPTOP-`）——
+默认需 `y/N` 确认；`-Force` 跳过确认但仍展示 diff 与泄露结果（供自动化用）。这样随手微调不会污染可复用的基线。
 
-配置里的 WSL 标签页跟着机器走。脚本读注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 拿到本机真实安装的发行版，做双向比对：
+`git push` 直连失败后会自动用 git 进程级 `insteadOf` 改走镜像重试一次，不写全局配置（只读镜像不会把 push 改写坏）。
+
+---
+
+## 八、跨机器差异是怎么处理的
+
+| 差异点 | 处理方式 |
+| --- | --- |
+| 配置目录路径 | 运行时探测，不写进仓库 |
+| 背景图路径 | `settings.json` 里写 `%USERPROFILE%\Pictures\2.jpg`，WT 展开环境变量 |
+| 字体 | 仓库内置 ttf，离线安装；缺失时联网兜底 |
+| WSL 发行版 | 注册表检测，报告 / `-PruneProfiles` / `-SyncProfiles` |
+| 软件 | `packages.json` 声明，scoop 优先、winget 兜底 |
+| scoop 安装位置 | 跟随目标机自己的 `%SCOOP%`（本机 `D:\scoop`，新机默认 `~\scoop`） |
+| 网络 / 代理 | 运行时实测，有代理用代理、没有走镜像；代理不写进任何配置 |
+| winget、git、scoop、Windows Terminal | 检测缺失则自动安装 |
+
+### WSL profile 同步
+
+脚本读注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 拿本机真实发行版，做双向比对：
 
 ```
 ==> 检查 WSL profile
@@ -171,211 +245,85 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 ```
 
 - `-PruneProfiles` —— 删掉本机打不开的
-- `-SyncProfiles` —— 双向同步：删掉无效的，同时把本机有但配置没有的加进去
+- `-SyncProfiles` —— 双向同步（删无效 + 补缺失）
 - 加 `-Force` 确认（符号链接模式下会直接改仓库文件）
 
-**关于自动添加的 GUID**：Windows Terminal 用 UUIDv5 从发行版名生成动态 profile 的 GUID，命名空间是 `2bde4a90-d05f-401c-9492-e40884ead1d8`，name 按 **UTF-16LE** 取字节（见源码 `DynamicProfileUtils.h`）。脚本复现了这个算法，`Alpine → 1777cdf0-b2c4-5a63-a204-eb60f349ea7c` 这类样本可以精确对上。
+新加的 profile 用 UUIDv5 从发行版名生成 GUID（命名空间 `2bde4a90-d05f-401c-9492-e40884ead1d8`，name 按 UTF-16LE 取字节），与 WT 动态生成一致。注意 `Microsoft.WSL` 源的发行版走另一套规则，补出来可能同名不同 ID——新机器首次部署通常不受影响。
 
-但要注意：只有 `Windows.Terminal.Wsl` 源用这套规则，`Microsoft.WSL`（新 WSL 生成器）和 Store 应用包（`CanonicalGroupLimited.*`）各有自己的算法。所以如果宿主机某个发行版本来的 profile 是 `Microsoft.WSL` 源，脚本补出来的可能是另一个 GUID，终端里会看到两个同名标签——删掉其中一个即可。**新机器上首次部署通常不受影响**（那时还没有历史 profile）。
+---
 
-## PowerShell 版本
+## 九、网络：有代理就用，没有就走镜像
 
-脚本同时兼容 Windows PowerShell 5.1 和 PowerShell 7：
+代理只在自己机器上有、且不常开，所以**绝不写进配置**，只在本次运行内用环境变量带（git / curl / scoop 都认），进程结束即失效。
 
-- 检测到 PS7 运行时，`Add-AppxPackage` / `Get-AppxPackage` 这类操作会自动转交 `powershell.exe`（5.1）子进程执行，因为 **Appx 模块在 PS7 下会报 `Operation is not supported on this platform`**
-- 脚本本身不需要 PS7，系统自带的 5.1 就能跑完全部流程
+启动判断规则：
 
-**关于卸载 PS7**：不建议。PowerShell 7 常被其他工具链依赖（VS Code 终端配置、各类 CLI 的 pwsh 脚本等），贸然卸载可能连带打断这些工具。本仓库的脚本不依赖 PS7，装或不装都不影响使用。
+1. 候选代理来源：`-Proxy` 参数 → `HTTPS_PROXY` 等环境变量 → 系统代理注册表
+2. 逐个实测：先 TCP 连端口，**再真的发一次请求到 github.com**
+3. 通得过 → 本次全走它；通不过 → 自动切 gh-proxy 镜像
 
-## 国内网络
+第二步不能省：代理软件关了但注册表留着旧地址、或端口开着却连不上 GitHub（只代理内网 / 需认证 / 工具注入的代理），只测端口会误判成可用，导致所有下载卡死。
 
-判断逻辑见上面「网络：有代理就用，没有就走镜像」。这里只补两条实现细节：
+镜像模式下：
 
-直连 GitHub 经常是「龟速但不报错」，超时参数兜不住，会让人以为脚本卡死——所以镜像不是可选项，是默认项。
+- bucket 的 `git clone` 走 `https://gh-proxy.com/https://github.com/...`
+- 脚本自身下载走镜像，失败回退直连
+- `api.github.com` / `raw.githubusercontent.com` 也一并改写（实测都返回 200），否则无代理时只镜像 `github.com` 会让 winget/git/WT 查版本静默退回内置版本号
+- 装 scoop 时先试 `get.scoop.sh`，失败从镜像拉 `ScoopInstaller/Install` 的 `install.ps1`
+- 导出的 `packages.json` 会剥掉镜像前缀，不固化进仓库
 
-下载统一交给系统自带的 `curl.exe` 而不是 `Invoke-WebRequest`——后者在 PowerShell 5.1 下处理大文件加镜像分块响应时会挂死。curl 因代理环境的证书链问题加了 `-k`，只影响本次下载，不改动系统信任设置。
+直连 GitHub 常「龟速但不报错」，超时兜不住，会让人以为脚本卡死——所以镜像不是可选项，是默认项。下载统一用系统 `curl.exe`（5.1 的 `Invoke-WebRequest` 处理大文件 + 分块响应会挂死），代理证书问题加 `-k`，只影响本次下载。
 
-## 为什么用符号链接
+---
 
-链接建好之后，仓库文件就是本机配置本身：
+## 十、故障排查
 
-- 在 Windows Terminal 设置界面里改动 → 仓库里 `git diff` 立刻能看到
-- `git pull` 之后重启终端 → 新配置生效
-
-不需要任何「导出 / 导入」的中间步骤。
-
-符号链接需要当前登录令牌带 `SeCreateSymbolicLinkPrivilege`：要么开启开发者模式**并重新登录**，要么用管理员权限。都没有的话脚本自动改用复制模式，此时本机改动不会自动进仓库。
-
-## 日常使用
-
-```powershell
-.\sync.ps1                 # 看当前状态
-.\sync.ps1 -Pull           # 拉取更新并校验链接
-.\sync.ps1 -Push           # 提交并推送本机改动
-.\setup.ps1 -Verify        # 只检查链接是否还有效
-.\setup.ps1 -DryRun        # 预览会装哪些软件，不动系统
-.\setup.ps1 -ExportApps    # 把本机软件导回 packages.json
-.\setup.ps1 -SyncProfiles -Force   # 按本机实际情况同步 WSL profile
-.\update.ps1               # 看 scoop / winget 各有哪些更新，不动系统
-.\update.ps1 -Apply        # 真的升级
-```
-
-`update.ps1` 是更新软件的唯一入口，默认只报告不改动：
-
-- **scoop 侧** —— 先 `scoop update` 刷新 scoop 自身和 8 个 bucket，再列可升级项
-- **winget 侧** —— 列可升级项
-- **汇总** —— 两边各几个可更新；加 `-Apply` 才真的升，升完会再扫一遍，把「程序正在运行 / 需要管理员」导致没升上去的单独列出来
-
-它还会自动摘掉两类「看着像可更新、其实升不了」的条目，免得白等：
-
-| 类别 | 特征 | 处理 |
-| --- | --- | --- |
-| 装失败的残留 | 有版本目录但没有 `current` 链接 | 提示 `scoop uninstall <名>` 后重装 |
-| 孤儿 | `install.json` 里记的 bucket 已被移除，且没有任何现存 bucket 有同名包 | 提示换到 winget 或卸载 |
-
-> 注意：如果只是 bucket 被删、但别的 bucket 有同名包（比如 `pixpin` 从 `apps` 迁到了 `dorado`），它不算孤儿，会正常出现在可更新列表里。
-
-`-Apply` 升级 scoop 侧用的是显式名单而不是 `scoop update *`，这样孤儿目录不会刷一屏报错。
-
-装完新软件后同步仓库的标准动作：
-
-```powershell
-.\setup.ps1 -ExportApps
-git diff assets/packages.json     # 看一眼新增了什么
-.\sync.ps1 -Push
-```
-
-## 跨机器差异是怎么处理的
-
-| 差异点 | 处理方式 |
-| --- | --- |
-| 配置目录路径 | `setup.ps1` 运行时探测，不写进仓库 |
-| 背景图路径 | `settings.json` 里写 `%USERPROFILE%\Pictures\2.jpg`，WT 会展开环境变量 |
-| 字体 | 仓库内置 ttf，离线安装；缺失时联网兜底 |
-| WSL 发行版 | 注册表检测，报告 / `-PruneProfiles` / `-SyncProfiles` |
-| 软件 | `assets/packages.json` 声明，scoop 优先、winget 兜底 |
-| scoop 安装位置 | 跟随目标机自己的 `%SCOOP%`（本机是 `D:\scoop`，新机器默认 `~\scoop`） |
-| 网络 / 代理 | 运行时实测，有代理用代理、没有走镜像；代理不写进任何配置 |
-| winget、git、scoop、Windows Terminal | 检测缺失则自动安装 |
-
-## 故障排查
-
-**提示「创建符号链接失败：此操作需要管理员权限」，但开发者模式明明是开的**
-
-开发者模式的注册表开关（`AllowDevelopmentWithoutDevLicense = 1`）只是「允许」，真正决定能否建链接的是登录令牌里的 `SeCreateSymbolicLinkPrivilege`。开启开发者模式后**必须重新登录（或重启）**，这个权限才会进入令牌。
-
-实测当前是否具备权限：
-
-```powershell
-$p="$env:TEMP\lt"; New-Item -ItemType Directory $p -Force|Out-Null; Set-Content "$p\t.txt" x; try{New-Item -ItemType SymbolicLink -Path "$p\l.txt" -Target "$p\t.txt" -ErrorAction Stop|Out-Null; "可以创建"}catch{"无权限"}; Remove-Item $p -Recurse -Force
-```
-
-解决：`.\setup.ps1 -Elevate` 自动提权，或管理员窗口里直接跑，或重启后重跑。
+**创建符号链接失败，提示需要管理员，但开发者模式明明开着**
+开发者模式只是「允许」，真正决定能否建链接的是登录令牌里的 `SeCreateSymbolicLinkPrivilege`。开启后**必须重新登录（或重启）**权限才进令牌。解决：`.\setup.ps1 -Elevate`，或管理员窗口跑，或重启后重跑。
 
 **脚本说「代理连不上」，但我明明开着代理**
-
-脚本的判断标准是「能不能真的访问到 github.com」，不是「端口开着没」。三种常见情况：
-
-- 代理软件关了，但系统代理注册表里还留着上次的地址（`ProxyEnable=0`、`ProxyServer=127.0.0.1:7897`）→ 正常，会自动切镜像
-- 代理开着但系统代理开关是关的（TUN 模式）→ 脚本仍会读到注册表里的地址并实测，能用就用
-- 代理只代理内网、或需要认证 → 实测会失败，自动切镜像
-
-想强制用某个代理：`.\setup.ps1 -Proxy 127.0.0.1:7897`。想确认到底通不通：
+判断标准是「能不能真访问 github.com」，不是「端口开着没」。三种情况：代理关了注册表留旧地址（自动切镜像）、代理开但系统开关关（TUN 模式，仍会实测）、代理只代理内网或需认证（自动切镜像）。强制指定：`.\setup.ps1 -Proxy 127.0.0.1:7897`。确认通不通：
 
 ```powershell
 curl.exe -k -s -o NUL -w "%{http_code}`n" -x http://127.0.0.1:7897 --max-time 10 https://github.com
 ```
 
-返回 200/301 就是通，`000` 就是不通。
-
-**bucket 克隆卡住或只建了个空目录**
-
-`gh-proxy.com` 支持 git 协议，镜像模式下会自动走它。如果仍然失败，手工补：
-
-```powershell
-scoop bucket rm <名字>
-git clone https://gh-proxy.com/https://github.com/<owner>/<repo> "$env:SCOOP\buckets\<名字>"
-git -C "$env:SCOOP\buckets\<名字>" remote set-url origin https://github.com/<owner>/<repo>
-```
+返回 200/301 即通，`000` 即不通。
 
 **git push 报 `CONNECT tunnel failed, response 502`**
-
-环境里有多个代理在跑时，git 可能连到了错误的那个（比如工具注入的代理不支持 CONNECT 隧道）。用 `git -c http.proxy=...` 显式指定可用代理：
+环境有多个代理时，git 可能连到不支持 CONNECT 隧道的那个（比如工具注入的代理）。显式指定可用代理：
 
 ```powershell
 git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push
 ```
 
-先用 `curl -x http://127.0.0.1:7897 -s -o /dev/null -w "%{http_code}" https://github.com` 确认哪个端口返回 200。
-
 **git 报 `CRYPT_E_NO_REVOCATION_CHECK` 或证书错误**
-
-代理或公司网络环境下常见，证书吊销检查（OCSP）被阻断。临时关掉：
-
-```powershell
-git config --global http.schannelCheckRevoke false
-```
+代理/公司网络下 OCSP 被阻断。临时关掉：`git config --global http.schannelCheckRevoke false`。
 
 **`Get-AppxPackage` 报 `Operation is not supported on this platform`**
+在 PS7 里执行了 Appx 命令。手动操作用 `powershell.exe` 而非 `pwsh.exe`；本脚本已自动处理。
 
-在 PowerShell 7 里执行了 Appx 命令，该模块只支持 5.1。本脚本已自动处理；手动操作时用 `powershell.exe` 而不是 `pwsh.exe`。
-
-**在 WT 设置界面保存过配置后，`-Verify` 报「是普通文件而非链接」**
-
-部分 WT 版本保存设置时会用临时文件替换原文件，把符号链接替换成实体文件。重跑 `.\setup.ps1` 恢复即可。
+**`-Verify` 报「是普通文件而非链接」**
+部分 WT 版本保存设置时会用临时文件替换原文件，把符号链接变成实体文件。重跑 `.\setup.ps1` 恢复。
 
 **背景图不显示**
+确认 `%USERPROFILE%\Pictures\2.jpg` 存在；目标机已有同名文件时默认不覆盖，需 `.\setup.ps1 -Force`。
 
-确认 `%USERPROFILE%\Pictures\2.jpg` 存在；目标机已有同名文件时脚本默认不覆盖，需要 `.\setup.ps1 -Force`。
-
-**`scoop reset` / `scoop uninstall` 说「是全局应用，需要管理员」，但明明没装过全局包**
-
-`SCOOP_GLOBAL` 被设成了和 `SCOOP` 同一个路径。scoop 判断「是否全局应用」靠的是路径比对，两个变量指向同一处时所有本地应用都会被误判成全局的。
-
-```powershell
-[Environment]::GetEnvironmentVariable('SCOOP_GLOBAL','Machine')   # 看机器级的值
-```
-
-要么管理员 PowerShell 里删掉这个机器级变量（让 scoop 回落到默认的 `C:\ProgramData\scoop`），要么给当前用户设一个不冲突的值：
+**`scoop reset` / `uninstall` 说「是全局应用，需要管理员」**
+`SCOOP_GLOBAL` 被设成和 `SCOOP` 同一路径，scoop 靠路径比对误判。删掉机器级变量，或给用户设不冲突的值：
 
 ```powershell
 [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL','C:\ProgramData\scoop','User')
 ```
 
-用户级变量会覆盖机器级，改完重开终端生效。
-
-**`scoop update` 报 `Uncommitted changes detected. Update aborted.`**
-
-scoop 自身是个 git 仓库（`$env:SCOOP\apps\scoop\current`），本地文件被改过就会拒绝自我更新。看是哪些文件、改了什么：
-
-```powershell
-git -C "$env:SCOOP\apps\scoop\current" status --short
-git -C "$env:SCOOP\apps\scoop\current" diff --stat
-```
-
-确认没有自己要保留的改动后还原：
-
-```powershell
-git -C "$env:SCOOP\apps\scoop\current" checkout -- .
-```
+**`scoop update` 报 `Uncommitted changes detected`**
+scoop 自身是 git 仓库，本地被改过就拒绝更新。看改动、确认无保留后 `git -C "$env:SCOOP\apps\scoop\current" checkout -- .`。
 
 **`scoop update` 报 `fatal: unable to access 'https://mirror.ghproxy.com/...'`**
+scoop 的 `scoop_repo` 指向停服镜像。改回官方：`scoop config scoop_repo https://github.com/ScoopInstaller/Scoop`。
 
-scoop 的 `scoop_repo` 配置指向了已经停服的镜像。改回官方地址：
-
-```powershell
-scoop config scoop_repo https://github.com/ScoopInstaller/Scoop
-git -C "$env:SCOOP\apps\scoop\current" remote set-url origin https://github.com/ScoopInstaller/Scoop
-```
-
-**scoop 在代理关掉之后所有操作都失败**
-
-`scoop config proxy` 里写死了代理地址。代理不是常开的话应该删掉，让 scoop 跟着系统代理 / 环境变量走：
-
-```powershell
-scoop config rm proxy
-```
+**scoop 在代理关掉后所有操作失败**
+`scoop config proxy` 写死了代理地址。删掉让 scoop 跟系统走：`scoop config rm proxy`。
 
 **配置被改坏了**
-
-每次部署前都会生成 `settings.json.bak-<时间戳>`，直接复制回去即可。
+每次部署前生成 `settings.json.bak-<时间戳>`，复制回去即可。
