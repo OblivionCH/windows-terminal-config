@@ -39,9 +39,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 1. **winget** —— 没有就自动下载安装（msixbundle + VCLibs 依赖，用 5.1 的 Appx 装）
 2. **git** —— 没有就先装。scoop 的 bucket 本质是 git 仓库，没 git 连 bucket 都加不了
 3. **scoop** —— 没有就自动安装，并把仓库里的配置合并进去（只补缺失项，不动本机已有的 token / proxy）
-4. **scoop bucket** —— 按清单配齐 `main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `nerd-fonts` / `apps`，不用手动一个个 `bucket add`
-5. **scoop 软件** —— 装清单里的 47 个命令行工具和应用，已装的自动跳过
-6. **winget 软件** —— 装 scoop 里没有的 22 个（浏览器、微信生态、办公、驱动类工具等）
+4. **scoop bucket** —— 按清单配齐 8 个：`main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `nerd-fonts` / `dorado` / `java`，不用手动一个个 `bucket add`。已存在的会顺手核对地址（仓库搬家后自动改 remote）
+5. **scoop 软件** —— 装清单里的 44 个命令行工具和应用，已装的自动跳过
+6. **winget 软件** —— 装 scoop 里没有的 25 个（浏览器、微信生态、办公、驱动类工具等）
 7. **Windows Terminal** —— 没装就自动安装。优先 winget，回退官方 msixbundle
 8. **定位配置目录** —— Store 版 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState`，预览版走 `...TerminalPreview...`，非 Store 便携版走 `%LOCALAPPDATA%\Microsoft\Windows Terminal`
 9. **备份并落地配置** —— 原文件存为 `settings.json.bak-<时间戳>`，本机配置换成指向仓库文件的符号链接（无权限时退回复制模式）
@@ -67,9 +67,47 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 - **`scoop`** —— scoop 能覆盖的全部走这里，安装到 `%SCOOP%`，不需要管理员权限
 - **`winget`** —— scoop 里没有的走 winget，覆盖浏览器、微信/飞书/豆包、PDF24、Quicker 这类
 
-**判断"装没装"的方式**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 这个链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装会返回 97 直接跳过。
+### 配了哪 8 个 bucket
+
+| bucket | 用途 |
+| --- | --- |
+| `main` | 命令行工具主力库 |
+| `extras` | GUI 应用（Inkscape、Sublime、Obsidian、PowerToys…） |
+| `versions` | 同一软件的多版本（`python@3.9` 这种写法） |
+| `nirsoft` | NirSoft 那套小工具 |
+| `sysinternals` | 微软 Sysinternals 全套 |
+| `nerd-fonts` | Nerd Font 字体（CascadiaCode-NF、Mononoki-NF） |
+| `dorado` | 中文软件：QQ NT、网易云、钉钉、飞书、企业微信、阿里云盘、B 站 |
+| `java` | 多版本 JDK：Temurin、Zulu、Corretto、GraalVM |
+
+**为什么不放 `kkzzhizhou/scoop-apps`**：那个聚合库有 14903 个 manifest、33.7 MB，是其他所有 bucket 加起来的三倍多，但实际只贡献了 4 个包（Bandicam、Dropbox、PixPin、TIM）。其中 PixPin 在 `dorado` 里就有，另外 3 个改走 winget 了，而且它和 dorado 已经出现同名包冲突。删掉之后 `scoop update` 明显变快。要装回来一条命令：`scoop bucket add apps https://github.com/kkzzhizhou/scoop-apps`。
+
+**判断"装没装"的方式**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 这个链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装会返回 97 或 `0x8A150061` 直接跳过。
 
 `--no-upgrade` 这个参数很关键。不加的话 winget 会把"已安装"当成"可以升级"，遇到正在运行的程序就报 `0x80070020` 文件占用失败，还会白白耗掉几分钟。
+
+## 网络：有代理就用，没有就走镜像
+
+代理只在自己机器上有，而且不常开。所以**代理绝不写进任何配置**，只在本次运行内用环境变量带（git / curl / scoop 都认这个变量），进程结束就没了。
+
+脚本启动时先判断网络，规则是：
+
+1. 候选代理来源：`-Proxy` 参数 → `HTTPS_PROXY` 等环境变量 → 系统代理设置
+2. 逐个实测：先 TCP 连端口，**再真的发一次请求到 github.com**
+3. 通得过 → 本次运行全走它
+4. 通不过 → 自动切 gh-proxy 镜像
+
+第二步不能省。常见两种误判：代理软件关了但注册表里还留着上次的地址；或者端口开着却连不上 GitHub（只代理内网的、要认证的、某些工具注入的代理）。只测端口的话会把它们当成可用代理，结果所有下载都卡死。
+
+镜像模式下：
+
+- bucket 的 `git clone` 走 `https://gh-proxy.com/https://github.com/...`（实测支持 git 协议）
+- 脚本自己的下载走镜像，失败回退直连
+- 导出的 `packages.json` 会把镜像前缀剥掉，不会把镜像地址固化进仓库
+
+手动指定：`.\setup.ps1 -Proxy 127.0.0.1:7897`。
+
+**镜像管不到的部分**：`scoop install` 时下载安装包用的是 manifest 里写的原始地址（多数是 GitHub Releases），没有代理还是会慢。这种时候要么开代理，要么临时用 `justorez/scoop-cn` 这类把下载地址换成国内源的镜像库。
 
 ### 维护清单
 
@@ -81,10 +119,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 
 它会扫本机实际情况重写 `packages.json`，然后 `.\sync.ps1 -Push` 提交。
 
-两个已知取舍：
+三个已知取舍：
 
 - **winget export 有盲区**：它只认自己装过的包，用安装程序手动装的（Chrome、Firefox、夸克网盘、迅雷）完全识别不出来。所以导出时会把**旧清单里的条目并回去**，并在输出里列出「识别不出但保留」的几项——看到这个提示不用慌，那是正常的
 - **卸载不会自动从清单里消失**：因为是并集，手工删条目就行
+- **bucket 没了的应用会被跳过**：如果某个应用当初装的 bucket 已经不在清单里、别的 bucket 也没有同名包，导出时不会写进 `scoop` 段（写进去在别的机器也装不回来），而是单独列出来提醒你
 
 同一个盲区在安装时也有副作用：这几项 winget 认不出「已装」，会重新跑一遍安装程序。Chrome、迅雷的安装器一般会自己识别成"已存在"然后跳过或修复，但确实会弹一次窗口。只想装缺失的、不想动已装的，用 `-DryRun` 先看清单，或临时把这几项注释掉。
 
@@ -107,7 +146,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 **字体**：仓库里带 4 个 Meslo ttf，直接复制 + 写注册表 + `AddFontResource`，全程离线。仓库没有字体文件时才回退到从 `ryanoasis/nerd-fonts` 下载 `Meslo.zip`（63 MB），并只提取配置里 `font.face` 对应的族。
 
 跳过某些步骤：`-SkipApps`（不装软件）、`-SkipWinget`、`-SkipScoop`、`-SkipTerminal`、`-SkipFont`、`-SkipBackground`。
-只装软件不碰配置：`-AppsOnly`。只看不装：`-DryRun`。
+只装软件不碰配置：`-AppsOnly`。只看不装：`-DryRun`。指定代理：`-Proxy 127.0.0.1:7897`。
 
 ## WSL profile 同步
 
@@ -142,7 +181,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 
 ## 国内网络
 
-脚本里所有 GitHub 下载都优先走 `gh-proxy.com` 镜像，失败才回退直连。原因很实际：直连 GitHub 经常是「龟速但不报错」，超时参数兜不住，会让人以为脚本卡死。
+判断逻辑见上面「网络：有代理就用，没有就走镜像」。这里只补两条实现细节：
+
+直连 GitHub 经常是「龟速但不报错」，超时参数兜不住，会让人以为脚本卡死——所以镜像不是可选项，是默认项。
 
 下载统一交给系统自带的 `curl.exe` 而不是 `Invoke-WebRequest`——后者在 PowerShell 5.1 下处理大文件加镜像分块响应时会挂死。curl 因代理环境的证书链问题加了 `-k`，只影响本次下载，不改动系统信任设置。
 
@@ -187,6 +228,7 @@ git diff assets/packages.json     # 看一眼新增了什么
 | WSL 发行版 | 注册表检测，报告 / `-PruneProfiles` / `-SyncProfiles` |
 | 软件 | `assets/packages.json` 声明，scoop 优先、winget 兜底 |
 | scoop 安装位置 | 跟随目标机自己的 `%SCOOP%`（本机是 `D:\scoop`，新机器默认 `~\scoop`） |
+| 网络 / 代理 | 运行时实测，有代理用代理、没有走镜像；代理不写进任何配置 |
 | winget、git、scoop、Windows Terminal | 检测缺失则自动安装 |
 
 ## 故障排查
@@ -202,6 +244,32 @@ $p="$env:TEMP\lt"; New-Item -ItemType Directory $p -Force|Out-Null; Set-Content 
 ```
 
 解决：`.\setup.ps1 -Elevate` 自动提权，或管理员窗口里直接跑，或重启后重跑。
+
+**脚本说「代理连不上」，但我明明开着代理**
+
+脚本的判断标准是「能不能真的访问到 github.com」，不是「端口开着没」。三种常见情况：
+
+- 代理软件关了，但系统代理注册表里还留着上次的地址（`ProxyEnable=0`、`ProxyServer=127.0.0.1:7897`）→ 正常，会自动切镜像
+- 代理开着但系统代理开关是关的（TUN 模式）→ 脚本仍会读到注册表里的地址并实测，能用就用
+- 代理只代理内网、或需要认证 → 实测会失败，自动切镜像
+
+想强制用某个代理：`.\setup.ps1 -Proxy 127.0.0.1:7897`。想确认到底通不通：
+
+```powershell
+curl.exe -k -s -o NUL -w "%{http_code}`n" -x http://127.0.0.1:7897 --max-time 10 https://github.com
+```
+
+返回 200/301 就是通，`000` 就是不通。
+
+**bucket 克隆卡住或只建了个空目录**
+
+`gh-proxy.com` 支持 git 协议，镜像模式下会自动走它。如果仍然失败，手工补：
+
+```powershell
+scoop bucket rm <名字>
+git clone https://gh-proxy.com/https://github.com/<owner>/<repo> "$env:SCOOP\buckets\<名字>"
+git -C "$env:SCOOP\buckets\<名字>" remote set-url origin https://github.com/<owner>/<repo>
+```
 
 **git push 报 `CONNECT tunnel failed, response 502`**
 

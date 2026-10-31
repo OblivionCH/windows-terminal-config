@@ -1,12 +1,16 @@
 {
   "buckets": [
     {
-      "name": "apps",
-      "source": "https://github.com/kkzzhizhou/scoop-apps"
+      "name": "dorado",
+      "source": "https://github.com/chawyehsu/dorado"
     },
     {
       "name": "extras",
       "source": "https://github.com/ScoopInstaller/Extras"
+    },
+    {
+      "name": "java",
+      "source": "https://github.com/ScoopInstaller/Java"
     },
     {
       "name": "main",
@@ -22,7 +26,7 @@
     },
     {
       "name": "sysinternals",
-      "source": "https://github.com/niheaven/scoop-sysinternals"
+      "source": "https://github.com/ScoopInstaller/Sysinternals"
     },
     {
       "name": "versions",
@@ -32,12 +36,10 @@
   "scoop": [
     "7zip",
     "aria2",
-    "Bandicam",
     "CascadiaCode-NF",
     "CascadiaCode-NF-Mono",
     "dismplusplus",
     "ditto",
-    "dropbox-np",
     "fastcopy",
     "ffmpeg",
     "gcc",
@@ -75,18 +77,19 @@
     "sublime-text",
     "sudo",
     "sumatrapdf",
-    "tim",
     "wechat"
   ],
   "winget": [
     "Alibaba.Quark",
     "appmakes.Typora",
     "Baidu.BaiduNetdisk",
+    "BandicamCompany.Bandicam",
     "BillStewart.SyncthingWindowsSetup",
     "ByteDance.Doubao",
     "ByteDance.Feishu",
     "ByteDance.Trae.CN",
     "ClashVergeRev.ClashVergeRev",
+    "Dropbox.Dropbox",
     "geeksoftwareGmbH.PDF24Creator",
     "Google.Chrome",
     "LiErHeXun.Quicker",
@@ -98,6 +101,7 @@
     "Nexmoe.VidBee",
     "Tailscale.Tailscale",
     "Tencent.TencentDocs",
+    "Tencent.TIM",
     "Tencent.WorkBuddy",
     "Thunder.Thunder",
     "voidtools.Everything"

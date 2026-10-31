@@ -48,6 +48,12 @@
 .PARAMETER DryRun
     只报告"会装什么"，不实际安装任何软件。
 
+.PARAMETER Proxy
+    手动指定代理，形如 `127.0.0.1:7897`。不填则自动探测：先看环境变量，
+    再看系统代理设置，并且**实际连接测试**端口通不通——注册表里留着旧地址
+    或系统代理开关是关的都很常见，光看配置会误判。
+    探测不到就自动改用 gh-proxy 镜像，不需要代理也能装。
+
 .PARAMETER PruneProfiles
     把本机不存在的 WSL 发行版对应的 profile 从配置中移除。
     注意：符号链接模式下这会改动仓库文件。
@@ -88,6 +94,7 @@ param(
     [switch]$AppsOnly,
     [switch]$ExportApps,
     [switch]$DryRun,
+    [string]$Proxy,
     [switch]$PruneProfiles,
     [switch]$SyncProfiles,
     [switch]$Force,
@@ -135,9 +142,17 @@ function Get-RemoteFile {
     # 下载统一交给系统自带的 curl.exe：Invoke-WebRequest 在 5.1 下处理
     # 这种大文件 + 镜像分块响应会挂死。代理环境的证书链不被 curl 自带
     # CA 认可，故用 -k 跳过校验（只影响本次下载，不改变系统信任设置）。
+    $mirror = $null
+    if ($Uri -like 'https://github.com/*') { $mirror = 'https://gh-proxy.com/' + $Uri }
+
     $attempts = @()
-    if ($Uri -like 'https://github.com/*') { $attempts += ('https://gh-proxy.com/' + $Uri) }
-    $attempts += $Uri
+    if ($mirror) {
+        # 有可用代理时直连就够快，镜像留作兜底；没有代理才让镜像打头
+        if ($script:ProxyAddr) { $attempts += $Uri; $attempts += $mirror }
+        else { $attempts += $mirror; $attempts += $Uri }
+    } else {
+        $attempts += $Uri
+    }
 
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     $last = $null
@@ -156,6 +171,110 @@ function Get-RemoteFile {
         }
     }
     throw $last
+}
+
+# ---------------------------------------------------------------------------
+# 网络：有本地代理就用代理，没有就走镜像
+#
+# 现实情况是「代理只在自己机器上有，而且不是常开」。所以不能把代理写死进
+# 任何配置——一旦写死，换台机器或关掉代理，所有下载都会卡住。
+# 这里只在本次运行内用环境变量带代理（git/curl/scoop 都认），进程结束就没了。
+# ---------------------------------------------------------------------------
+$script:UseMirror = $false
+$script:ProxyAddr = $null
+
+function Get-ProxyCandidate {
+    # 显式参数优先
+    if ($Proxy) { return $Proxy }
+
+    # 环境变量（git/curl 本来就认）
+    foreach ($v in 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy') {
+        $val = [Environment]::GetEnvironmentVariable($v)
+        if ($val) { return ($val -replace '^https?://', '') }
+    }
+
+    # 系统代理设置
+    try {
+        $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ($p.ProxyServer) {
+            $s = [string]$p.ProxyServer
+            if ($s -match '=') {
+                $m = [regex]::Match($s, 'https?=([^;]+)')
+                if ($m.Success) { return $m.Groups[1].Value.Trim() }
+            }
+            return $s.Trim()
+        }
+    } catch { }
+    return $null
+}
+
+function Test-ProxyAlive {
+    # 不能只看 ProxyEnable：常见情况是代理软件关掉了、注册表里还留着上次的
+    # 地址，或者代理在跑、系统代理开关却是关的。只能实测。
+    # 也不能只测端口：端口开着不代表能出去（可能只代理内网、或要认证、
+    # 或像某些工具注入的代理一样连不上 GitHub）。所以再做一次真实请求。
+    param([string]$Addr)
+    if (-not $Addr) { return $false }
+
+    $hp = ($Addr -replace '^https?://', '').TrimEnd('/')
+    $parts = $hp.Split(':')
+    $h = $parts[0]
+    $port = 80
+    if ($parts.Count -gt 1) { [void][int]::TryParse($parts[1], [ref]$port) }
+    if (-not $h -or $port -le 0) { return $false }
+
+    # 第一步：端口通不通（快速排除没启动的）
+    $client = New-Object Net.Sockets.TcpClient
+    try {
+        $ar = $client.BeginConnect($h, $port, $null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne(800)) { return $false }
+        $client.EndConnect($ar)
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+
+    # 第二步：能不能真的到 GitHub
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { return $true }
+    $probe = Join-Path $env:TEMP ("proxyprobe-" + [guid]::NewGuid().ToString('N') + ".txt")
+    try {
+        $code = & $curl -k -s -o $probe -w '%{http_code}' -x "http://$hp" --max-time 10 https://github.com 2>$null
+        return ("$code" -match '^[23]')
+    } catch {
+        return $false
+    } finally {
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Initialize-Network {
+    $cand = Get-ProxyCandidate
+    if ($cand -and (Test-ProxyAlive -Addr $cand)) {
+        $script:ProxyAddr = $cand
+        $env:HTTP_PROXY  = "http://$cand"
+        $env:HTTPS_PROXY = "http://$cand"
+        Write-Ok "检测到可用代理 $cand，本次运行的下载都走它"
+        return
+    }
+
+    $script:UseMirror = $true
+    if ($cand) {
+        Write-Note "代理 $cand 连不上（可能没开），改用 gh-proxy 镜像"
+    } else {
+        Write-Note '本机没有代理，GitHub 相关操作走 gh-proxy 镜像'
+    }
+    Write-Note '镜像只影响本次运行，不会写进任何配置文件'
+}
+
+function Get-BucketSource {
+    # 没有代理时，bucket 的 git clone 也走镜像（gh-proxy 支持 git 协议）
+    param([string]$Source)
+    if ($script:UseMirror -and $Source -like 'https://github.com/*') {
+        return 'https://gh-proxy.com/' + $Source
+    }
+    return $Source
 }
 
 # ---------------------------------------------------------------------------
@@ -179,6 +298,39 @@ function Find-Winget {
     $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
     if (Test-Path $p) { return $p }
     return $null
+}
+
+# 这两个函数要在 -Verify 分支之前就可用（脚本里函数是执行到定义行才生效的，
+# 所以不能放在文件后半段）
+function Get-WtConfigDir {
+    param([string]$WtExe)
+    $store    = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
+    $preview  = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState'
+    $portable = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal'
+    $all      = @($store, $preview, $portable)
+
+    foreach ($p in $all) {
+        if (Test-Path (Join-Path $p 'settings.json')) { return $p }
+    }
+    foreach ($p in $all) {
+        if (Test-Path $p) { return $p }
+    }
+
+    # 全新机器：按 wt.exe 位置判断形态
+    if ($WtExe -and $WtExe -like '*\WindowsApps\*') { return $store }
+    if ($WtExe -and $WtExe -match 'Preview') { return $preview }
+    return $portable
+}
+
+function Get-LinkState {
+    param([string]$Path, [string]$Source)
+    if (-not (Test-Path $Path)) { return 'missing' }
+    $item = Get-Item $Path -Force
+    if (-not $item.LinkType) { return 'file' }
+    $t = $item.Target
+    if ($t -is [array]) { $t = $t[0] }
+    if ([string]::Equals($t, $Source, 'OrdinalIgnoreCase')) { return 'linked-ok' }
+    return 'linked-other'
 }
 
 # ---------------------------------------------------------------------------
@@ -409,19 +561,47 @@ function Ensure-ScoopBuckets {
         $have = @(Get-ChildItem $bdir -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
     }
 
-    $added = 0
+    $added  = 0
     $failed = @()
+    $retargeted = @()
     $missing = @($Manifest.buckets | Where-Object { $have -notcontains $_.name })
 
-    if ($missing.Count -eq 0) { Write-Ok "bucket 已齐全（$($have.Count) 个）"; return }
+    # 已存在的 bucket 也要对一下地址：仓库搬家（比如 sysinternals 捐给官方）后
+    # 旧地址还在重定向，能用但迟早失效，这里顺手改过来。
+    foreach ($b in @($Manifest.buckets | Where-Object { $have -contains $_.name })) {
+        $dir = Join-Path $bdir $b.name
+        $cur = $null
+        try {
+            Push-Location $dir
+            $cur = (& git config --get remote.origin.url 2>$null | Select-Object -First 1)
+        } catch { } finally { Pop-Location }
+        if (-not $cur) { continue }
+
+        $norm = $cur -replace '^https://gh-proxy\.com/', ''
+        if ($norm -ne $b.source) {
+            if (-not $DryRun) {
+                Push-Location $dir
+                try { & git remote set-url origin (Get-BucketSource -Source $b.source) 2>&1 | Out-Null } catch { }
+                Pop-Location
+            }
+            $retargeted += $b.name
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        if ($retargeted.Count -gt 0) { Write-Ok ("bucket 已齐全（$($have.Count) 个），已更新地址：" + ($retargeted -join ', ')) }
+        else { Write-Ok "bucket 已齐全（$($have.Count) 个）" }
+        return
+    }
     if ($DryRun) {
         Write-Note ("将添加 {0} 个 bucket：{1}" -f $missing.Count, (($missing | ForEach-Object { $_.name }) -join ', '))
+        if ($retargeted.Count -gt 0) { Write-Note ("将更新地址：{0}" -f ($retargeted -join ', ')) }
         return
     }
 
     foreach ($b in $missing) {
         Write-Note "添加 bucket：$($b.name)"
-        & scoop bucket add $b.name $b.source 2>&1 | Out-Null
+        & scoop bucket add $b.name (Get-BucketSource -Source $b.source) 2>&1 | Out-Null
         # scoop bucket add 不返回可靠的退出码，直接看目录有没有建出来
         if (Test-Path (Join-Path $bdir $b.name)) { $added++ } else { $failed += $b.name }
     }
@@ -430,6 +610,7 @@ function Ensure-ScoopBuckets {
         Write-Bad ("bucket 添加失败：" + ($failed -join ', '))
         Write-Note '通常是网络问题，重跑本脚本会重试缺失的 bucket'
     }
+    if ($retargeted.Count -gt 0) { Write-Ok ("已更新地址：" + ($retargeted -join ', ')) }
     if ($added -eq 0) { Write-Ok "bucket 已齐全（$($have.Count) 个）" }
     else { Write-Ok "已补充 $added 个 bucket" }
 }
@@ -540,18 +721,50 @@ function Export-PackageManifest {
                 Push-Location $d.FullName
                 $remote = (& git config --get remote.origin.url 2>$null | Select-Object -First 1)
             } catch { } finally { Pop-Location }
-            if ($remote) { $buckets += [pscustomobject]@{ name = $d.Name; source = $remote } }
+            if ($remote) {
+                # 镜像地址只在本机生效，不能带进仓库
+                $remote = $remote -replace '^https://gh-proxy\.com/', ''
+                $buckets += [pscustomobject]@{ name = $d.Name; source = $remote }
+            }
         }
     }
 
-    $apps = @()
+    # 清单里还留着哪些 bucket —— 用来判断某个应用还能不能装回来
+    $knownBuckets = @($buckets | ForEach-Object { $_.name })
+
+    # 这些 bucket 里能装到的应用名（判断"换个 bucket 还能装"的情况，
+    # 比如 pixpin 当初装在 apps，apps 删了但 dorado 里有同名的）
+    $available = @{}
+    foreach ($bn in $knownBuckets) {
+        $bp = Join-Path $bdir "$bn\bucket"
+        if (-not (Test-Path $bp)) { continue }
+        foreach ($f in Get-ChildItem $bp -Filter *.json -ErrorAction SilentlyContinue) {
+            $available[$f.BaseName.ToLower()] = $true
+        }
+    }
+
+    $apps   = @()
+    $orphan = @()
     if (Test-Path $adir) {
-        # 只认"装成功"的应用：scoop 会给装好的应用建 current 链接，
-        # 装失败（比如网络断掉）只留一个版本目录，没有 current。
-        # scoop 自身也在 apps 里，要排除。
-        $apps = @(Get-ChildItem $adir -Directory -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -ne 'scoop' -and (Test-Path (Join-Path $_.FullName 'current')) } |
-                  Select-Object -ExpandProperty Name | Sort-Object)
+        foreach ($d in Get-ChildItem $adir -Directory -ErrorAction SilentlyContinue) {
+            if ($d.Name -eq 'scoop') { continue }                      # scoop 自己也在 apps 里
+            if (-not (Test-Path (Join-Path $d.FullName 'current'))) { continue }  # 装失败的残留
+
+            # 当初装的 bucket 已经不在清单里、别的 bucket 也没有同名包的话，
+            # 导出去在别的机器上也装不回来
+            $bk = $null
+            $ij = Join-Path $d.FullName 'current\install.json'
+            if (Test-Path $ij) {
+                try { $bk = (Get-Content $ij -Raw -Encoding UTF8 | ConvertFrom-Json).bucket } catch { }
+            }
+            if ($bk -and $knownBuckets -notcontains $bk -and -not $available[$d.Name.ToLower()]) {
+                $orphan += $d.Name
+                continue
+            }
+
+            $apps += $d.Name
+        }
+        $apps = @($apps | Sort-Object)
     }
 
     # winget 侧只保留"用户主动装的软件"，系统运行库/框架一律剔除
@@ -626,6 +839,10 @@ function Export-PackageManifest {
         Write-Note ("winget 识别不出、但保留在清单里的 $($onlyOld.Count) 个：")
         Write-Host ("        " + ($onlyOld -join ', ')) -ForegroundColor DarkGray
     }
+    if ($orphan.Count -gt 0) {
+        Write-Note ("所属 bucket 已不在清单里、导出时跳过的 $($orphan.Count) 个：")
+        Write-Host ("        " + ($orphan -join ', ')) -ForegroundColor DarkGray
+    }
     Write-Note '检查无误后用 sync.ps1 -Push 提交'
 }
 
@@ -686,6 +903,25 @@ if ($ExportApps) {
     Export-PackageManifest
     exit 0
 }
+
+if ($Verify) {
+    # 纯只读检查，必须在装软件之前就退出
+    $wtExe      = Find-WtExe
+    $cfgDir     = Get-WtConfigDir -WtExe $wtExe
+    $targetFile = Join-Path $cfgDir 'settings.json'
+    Write-Step '检查链接状态'
+    Write-Ok $cfgDir
+    switch (Get-LinkState -Path $targetFile -Source $RepoSettings) {
+        'linked-ok'    { Write-Ok 'settings.json 已正确链接到本仓库' }
+        'linked-other' { Write-Note "链接指向了其他位置：$((Get-Item $targetFile -Force).Target)" }
+        'file'         { Write-Note 'settings.json 是普通文件而非链接（多半是 Windows Terminal 保存配置时替换了它），运行 .\setup.ps1 修复' }
+        'missing'      { Write-Note 'settings.json 不存在，运行 .\setup.ps1 部署' }
+    }
+    exit 0
+}
+
+Write-Step '检查网络'
+Initialize-Network
 
 if (-not $SkipWinget) {
     Write-Step '检查 winget'
@@ -757,29 +993,10 @@ if ($wtExe) {
 }
 
 # ---------------------------------------------------------------------------
-# 2. 定位配置目录
+# 2. 定位配置目录（Get-WtConfigDir / Get-LinkState 定义在文件前半段）
 # ---------------------------------------------------------------------------
-function Get-WtConfigDir {
-    $store    = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
-    $preview  = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState'
-    $portable = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal'
-    $all      = @($store, $preview, $portable)
-
-    foreach ($p in $all) {
-        if (Test-Path (Join-Path $p 'settings.json')) { return $p }
-    }
-    foreach ($p in $all) {
-        if (Test-Path $p) { return $p }
-    }
-
-    # 全新机器：按 wt.exe 位置判断形态
-    if ($wtExe -and $wtExe -like '*\WindowsApps\*') { return $store }
-    if ($wtExe -and $wtExe -match 'Preview') { return $preview }
-    return $portable
-}
-
 Write-Step '定位配置目录'
-$cfgDir     = Get-WtConfigDir
+$cfgDir     = Get-WtConfigDir -WtExe $wtExe
 $targetFile = Join-Path $cfgDir 'settings.json'
 Write-Ok $cfgDir
 
@@ -791,27 +1008,6 @@ if (-not (Test-Path $cfgDir)) {
 # ---------------------------------------------------------------------------
 # 3. 链接状态检查
 # ---------------------------------------------------------------------------
-function Get-LinkState {
-    param([string]$Path, [string]$Source)
-    if (-not (Test-Path $Path)) { return 'missing' }
-    $item = Get-Item $Path -Force
-    if (-not $item.LinkType) { return 'file' }
-    $t = $item.Target
-    if ($t -is [array]) { $t = $t[0] }
-    if ([string]::Equals($t, $Source, 'OrdinalIgnoreCase')) { return 'linked-ok' }
-    return 'linked-other'
-}
-
-if ($Verify) {
-    Write-Step '检查链接状态'
-    switch (Get-LinkState -Path $targetFile -Source $RepoSettings) {
-        'linked-ok'    { Write-Ok 'settings.json 已正确链接到本仓库' }
-        'linked-other' { Write-Note "链接指向了其他位置：$((Get-Item $targetFile -Force).Target)" }
-        'file'         { Write-Note 'settings.json 是普通文件而非链接（多半是 Windows Terminal 保存配置时替换了它），运行 .\setup.ps1 修复' }
-        'missing'      { Write-Note 'settings.json 不存在，运行 .\setup.ps1 部署' }
-    }
-    exit 0
-}
 
 # ---------------------------------------------------------------------------
 # 4. 判断能否创建符号链接（实测，比读注册表可靠）
@@ -858,6 +1054,7 @@ if ($Elevate -and -not $canLink -and -not $Copy) {
             if ($v) { $argList += "-$s" }
         }
         $argList += '-Elevate'
+        if ($Proxy) { $argList += @('-Proxy', $Proxy) }
         Start-Process powershell -Verb RunAs -ArgumentList $argList
         exit 0
     }
