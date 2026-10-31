@@ -1,0 +1,105 @@
+{
+  "buckets": [
+    {
+      "name": "apps",
+      "source": "https://github.com/kkzzhizhou/scoop-apps"
+    },
+    {
+      "name": "extras",
+      "source": "https://github.com/ScoopInstaller/Extras"
+    },
+    {
+      "name": "main",
+      "source": "https://github.com/ScoopInstaller/Main"
+    },
+    {
+      "name": "nerd-fonts",
+      "source": "https://github.com/matthewjberger/scoop-nerd-fonts"
+    },
+    {
+      "name": "nirsoft",
+      "source": "https://github.com/ScoopInstaller/Nirsoft"
+    },
+    {
+      "name": "sysinternals",
+      "source": "https://github.com/niheaven/scoop-sysinternals"
+    },
+    {
+      "name": "versions",
+      "source": "https://github.com/ScoopInstaller/Versions"
+    }
+  ],
+  "scoop": [
+    "7zip",
+    "aria2",
+    "Bandicam",
+    "CascadiaCode-NF",
+    "CascadiaCode-NF-Mono",
+    "dismplusplus",
+    "ditto",
+    "dropbox-np",
+    "fastcopy",
+    "ffmpeg",
+    "gcc",
+    "geekuninstaller",
+    "git",
+    "go",
+    "gow",
+    "grep",
+    "Inkscape",
+    "koodo-reader",
+    "llvm",
+    "localsend",
+    "MKVToolNix",
+    "Mononoki-NF",
+    "motrix",
+    "mpc-hc",
+    "n-m3u8dl-cli",
+    "neatdownloadmanager",
+    "neovim",
+    "nvm",
+    "obsidian",
+    "oh-my-posh",
+    "pandoc",
+    "pdf2svg",
+    "perl",
+    "php",
+    "pixpin",
+    "powertoys",
+    "python",
+    "quicklook",
+    "renamer",
+    "sed",
+    "siyuan-note",
+    "spacesniffer",
+    "sublime-text",
+    "sudo",
+    "sumatrapdf",
+    "tim",
+    "wechat"
+  ],
+  "winget": [
+    "Alibaba.Quark",
+    "appmakes.Typora",
+    "Baidu.BaiduNetdisk",
+    "BillStewart.SyncthingWindowsSetup",
+    "ByteDance.Doubao",
+    "ByteDance.Feishu",
+    "ByteDance.Trae.CN",
+    "ClashVergeRev.ClashVergeRev",
+    "geeksoftwareGmbH.PDF24Creator",
+    "Google.Chrome",
+    "LiErHeXun.Quicker",
+    "lyswhut.lx-music-desktop",
+    "Microsoft.OneDrive",
+    "Microsoft.PowerShell",
+    "Microsoft.VisualStudioCode",
+    "Mozilla.Firefox",
+    "Nexmoe.VidBee",
+    "Tailscale.Tailscale",
+    "Tencent.TencentDocs",
+    "Tencent.WorkBuddy",
+    "Thunder.Thunder",
+    "voidtools.Everything"
+  ]
+}

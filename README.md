@@ -1,12 +1,13 @@
-# Windows Terminal 配置
+# Windows Terminal 配置 + 软件环境
 
-我的 Windows Terminal 设置，一条命令复刻到任意一台 Windows 机器。
+我的 Windows Terminal 设置和常用软件清单，一条命令复刻到任意一台 Windows 机器——配置、字体、背景图、scoop bucket、几十个软件全都能一次性到位。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 | --- | --- |
 | `settings.json` | 主配置（主题、字体、快捷键、配色方案、profile 列表） |
+| `assets/packages.json` | 软件清单：scoop bucket / scoop 软件 / winget 软件 |
 | `assets/2.jpg` | 终端背景图 |
 | `assets/fonts/` | Meslo Nerd Font（4 个 ttf，安装时无需联网） |
 | `assets/scoop-config.json` | Scoop 配置（已脱敏，不含 token） |
@@ -15,28 +16,87 @@
 
 ## 在新机器上部署
 
-PowerShell 里执行一行：
+PowerShell 里执行一行（全新系统也能跑，不需要预装 git）：
+
+```powershell
+$d="$env:USERPROFILE\dotfiles\windows-terminal";$u="https://github.com/OblivionCH/windows-terminal-config/archive/refs/heads/main.zip";if(Test-Path "$d\setup.ps1"){if(Get-Command git -ErrorAction SilentlyContinue){git -C $d pull}}else{$z="$env:TEMP\wtcfg.zip";$t="$env:TEMP\wtcfg";foreach($s in @("https://gh-proxy.com/$u",$u)){& "$env:SystemRoot\System32\curl.exe" -k -L -s --fail -o $z $s;if((Test-Path $z) -and (Get-Item $z).Length -gt 0){break}};Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue;Expand-Archive $z $t -Force;New-Item -ItemType Directory $d -Force|Out-Null;Copy-Item "$t\windows-terminal-config-main\*" $d -Recurse -Force};powershell -NoProfile -ExecutionPolicy Bypass -File "$d\setup.ps1"
+```
+
+已经装过 git 的话，用短一点的版本（能 `git pull` 增量更新）：
 
 ```powershell
 $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull}else{git clone https://github.com/OblivionCH/windows-terminal-config.git $d}; powershell -NoProfile -ExecutionPolicy Bypass -File "$d\setup.ps1"
 ```
 
+想先看看会装什么、不动系统：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\windows-terminal\setup.ps1" -DryRun
+```
+
 脚本依次完成：
 
 1. **winget** —— 没有就自动下载安装（msixbundle + VCLibs 依赖，用 5.1 的 Appx 装）
-2. **scoop** —— 没有就自动安装，并把仓库里的配置合并进去（只补缺失项，不动本机已有的 token / proxy）
-3. **Windows Terminal** —— 没装就自动安装。优先 winget，回退官方 msixbundle
-4. **定位配置目录** —— Store 版 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState`，预览版走 `...TerminalPreview...`，非 Store 便携版走 `%LOCALAPPDATA%\Microsoft\Windows Terminal`
-5. **备份并落地配置** —— 原文件存为 `settings.json.bak-<时间戳>`，本机配置换成指向仓库文件的符号链接（无权限时退回复制模式）
-6. **背景图** —— 复制到 `%USERPROFILE%\Pictures\2.jpg`
-7. **字体** —— 优先用仓库内置的 ttf，仓库缺失才联网下载兜底
-8. **WSL profile** —— 对比宿主机实际安装的发行版，报告差异
+2. **git** —— 没有就先装。scoop 的 bucket 本质是 git 仓库，没 git 连 bucket 都加不了
+3. **scoop** —— 没有就自动安装，并把仓库里的配置合并进去（只补缺失项，不动本机已有的 token / proxy）
+4. **scoop bucket** —— 按清单配齐 `main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `nerd-fonts` / `apps`，不用手动一个个 `bucket add`
+5. **scoop 软件** —— 装清单里的 47 个命令行工具和应用，已装的自动跳过
+6. **winget 软件** —— 装 scoop 里没有的 22 个（浏览器、微信生态、办公、驱动类工具等）
+7. **Windows Terminal** —— 没装就自动安装。优先 winget，回退官方 msixbundle
+8. **定位配置目录** —— Store 版 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState`，预览版走 `...TerminalPreview...`，非 Store 便携版走 `%LOCALAPPDATA%\Microsoft\Windows Terminal`
+9. **备份并落地配置** —— 原文件存为 `settings.json.bak-<时间戳>`，本机配置换成指向仓库文件的符号链接（无权限时退回复制模式）
+10. **背景图** —— 复制到 `%USERPROFILE%\Pictures\2.jpg`
+11. **字体** —— 优先用仓库内置的 ttf，仓库缺失才联网下载兜底
+12. **WSL profile** —— 对比宿主机实际安装的发行版，报告差异
 
 最后重启 Windows Terminal 生效。
+
+## 软件清单 `assets/packages.json`
+
+```json
+{
+  "buckets": [ { "name": "extras", "source": "https://github.com/ScoopInstaller/Extras" } ],
+  "scoop":   [ "7zip", "git", "neovim", "..." ],
+  "winget":  [ "Google.Chrome", "Microsoft.VisualStudioCode", "..." ]
+}
+```
+
+三段各管一件事：
+
+- **`buckets`** —— 先配仓库，再装软件。缺哪个 bucket 就 `scoop bucket add`，已有的跳过
+- **`scoop`** —— scoop 能覆盖的全部走这里，安装到 `%SCOOP%`，不需要管理员权限
+- **`winget`** —— scoop 里没有的走 winget，覆盖浏览器、微信/飞书/豆包、PDF24、Quicker 这类
+
+**判断"装没装"的方式**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 这个链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装会返回 97 直接跳过。
+
+`--no-upgrade` 这个参数很关键。不加的话 winget 会把"已安装"当成"可以升级"，遇到正在运行的程序就报 `0x80070020` 文件占用失败，还会白白耗掉几分钟。
+
+### 维护清单
+
+装/卸了软件之后，让仓库跟上：
+
+```powershell
+.\setup.ps1 -ExportApps
+```
+
+它会扫本机实际情况重写 `packages.json`，然后 `.\sync.ps1 -Push` 提交。
+
+两个已知取舍：
+
+- **winget export 有盲区**：它只认自己装过的包，用安装程序手动装的（Chrome、Firefox、夸克网盘、迅雷）完全识别不出来。所以导出时会把**旧清单里的条目并回去**，并在输出里列出「识别不出但保留」的几项——看到这个提示不用慌，那是正常的
+- **卸载不会自动从清单里消失**：因为是并集，手工删条目就行
+
+### 装不上怎么办
+
+- **scoop 包失败** —— 多半是网络。单个重试：`scoop install <名字>`；bucket 没配齐就重跑 `setup.ps1`
+- **winget 包失败** —— 多数 winget 包需要管理员权限，用 `.\setup.ps1 -Elevate` 提权重跑，或手动 `winget install --id <ID> -e`
+- **两边都没有的** —— 比如向日葵、Watt Toolkit（后者只在 msstore 源里），脚本不会碰，自己装
 
 ## 自动安装的边界
 
 **winget**：`DesktopAppInstaller` 的 msixbundle 约 207 MB，依赖包 93 MB。查 GitHub API 拿最新版本，失败时用内置版本号 `v1.29.380`。Appx 操作全部转交 5.1 子进程。
+
+**git**：优先 `winget install Git.Git`；winget 不可用时下载 MinGit 便携版 zip 解压到 `%LOCALAPPDATA%\Programs\MinGit`，写进用户 PATH，免安装免管理员。
 
 **scoop**：跑官方 `get.scoop.sh` 安装脚本。装完刷新当前会话 PATH，再把 `assets/scoop-config.json` 合并进 `~/.config/scoop/config.json`。**只补本机没有的键**——`gh_token`、`proxy` 这类本机专属项绝不会被覆盖。
 
@@ -44,7 +104,8 @@ $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull
 
 **字体**：仓库里带 4 个 Meslo ttf，直接复制 + 写注册表 + `AddFontResource`，全程离线。仓库没有字体文件时才回退到从 `ryanoasis/nerd-fonts` 下载 `Meslo.zip`（63 MB），并只提取配置里 `font.face` 对应的族。
 
-跳过某些步骤：`-SkipWinget`、`-SkipScoop`、`-SkipTerminal`、`-SkipFont`。
+跳过某些步骤：`-SkipApps`（不装软件）、`-SkipWinget`、`-SkipScoop`、`-SkipTerminal`、`-SkipFont`、`-SkipBackground`。
+只装软件不碰配置：`-AppsOnly`。只看不装：`-DryRun`。
 
 ## WSL profile 同步
 
@@ -101,7 +162,17 @@ $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull
 .\sync.ps1 -Pull           # 拉取更新并校验链接
 .\sync.ps1 -Push           # 提交并推送本机改动
 .\setup.ps1 -Verify        # 只检查链接是否还有效
+.\setup.ps1 -DryRun        # 预览会装哪些软件，不动系统
+.\setup.ps1 -ExportApps    # 把本机软件导回 packages.json
 .\setup.ps1 -SyncProfiles -Force   # 按本机实际情况同步 WSL profile
+```
+
+装完新软件后同步仓库的标准动作：
+
+```powershell
+.\setup.ps1 -ExportApps
+git diff assets/packages.json     # 看一眼新增了什么
+.\sync.ps1 -Push
 ```
 
 ## 跨机器差异是怎么处理的
@@ -112,7 +183,9 @@ $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull
 | 背景图路径 | `settings.json` 里写 `%USERPROFILE%\Pictures\2.jpg`，WT 会展开环境变量 |
 | 字体 | 仓库内置 ttf，离线安装；缺失时联网兜底 |
 | WSL 发行版 | 注册表检测，报告 / `-PruneProfiles` / `-SyncProfiles` |
-| winget、scoop、Windows Terminal | 检测缺失则自动安装 |
+| 软件 | `assets/packages.json` 声明，scoop 优先、winget 兜底 |
+| scoop 安装位置 | 跟随目标机自己的 `%SCOOP%`（本机是 `D:\scoop`，新机器默认 `~\scoop`） |
+| winget、git、scoop、Windows Terminal | 检测缺失则自动安装 |
 
 ## 故障排查
 

@@ -5,12 +5,15 @@
 
 .DESCRIPTION
     把本仓库的配置复刻到当前机器，全过程无人值守：
-      1. 没装 Windows Terminal 就自动安装
-      2. 定位配置目录（Store / Store 预览版 / 非 Store 便携版三种形态）
-      3. 备份原配置，然后以符号链接（优先）或复制方式落地 settings.json
-      4. 放置背景图
-      5. 缺 Meslo Nerd Font 就自动下载安装到用户字体目录
-      6. 检测 WSL 发行版，报告或清理本机打不开的 profile
+      1. 补齐依赖工具：winget / git / scoop，缺什么装什么
+      2. 按 assets/packages.json 配置 scoop bucket，安装 scoop 软件
+      3. 用 winget 补齐 scoop 里没有的软件
+      4. 没装 Windows Terminal 就自动安装
+      5. 定位配置目录（Store / Store 预览版 / 非 Store 便携版三种形态）
+      6. 备份原配置，然后以符号链接（优先）或复制方式落地 settings.json
+      7. 放置背景图
+      8. 缺 Meslo Nerd Font 就自动安装
+      9. 检测 WSL 发行版，报告或清理本机打不开的 profile
 
     脚本同时兼容 Windows PowerShell 5.1 与 PowerShell 7。Appx 相关操作
     在 PowerShell 7 下不可用（模块不兼容），会自动转交 5.1 子进程执行。
@@ -27,6 +30,24 @@
 .PARAMETER SkipTerminal
     即使检测不到 Windows Terminal 也不自动安装，只提示。
 
+.PARAMETER SkipWinget
+    不检查、不安装 winget。
+
+.PARAMETER SkipScoop
+    不检查、不安装 scoop。
+
+.PARAMETER SkipApps
+    不安装 packages.json 里的软件（只部署配置）。
+
+.PARAMETER AppsOnly
+    只装软件，不碰 Windows Terminal 配置。适合先把环境备好再单独调配置。
+
+.PARAMETER ExportApps
+    把当前机器的 scoop bucket / 软件、winget 软件导回 assets/packages.json。
+
+.PARAMETER DryRun
+    只报告"会装什么"，不实际安装任何软件。
+
 .PARAMETER PruneProfiles
     把本机不存在的 WSL 发行版对应的 profile 从配置中移除。
     注意：符号链接模式下这会改动仓库文件。
@@ -38,10 +59,16 @@
     只检查当前配置文件的链接状态，不做任何修改。
 
 .PARAMETER Elevate
-    没有符号链接权限时，自动以管理员身份重启脚本（会弹 UAC）。
+    没有符号链接权限或 winget 装包失败时，自动以管理员身份重启脚本（会弹 UAC）。
 
 .EXAMPLE
     .\setup.ps1
+
+.EXAMPLE
+    .\setup.ps1 -AppsOnly
+
+.EXAMPLE
+    .\setup.ps1 -ExportApps
 
 .EXAMPLE
     .\setup.ps1 -PruneProfiles
@@ -57,6 +84,10 @@ param(
     [switch]$SkipTerminal,
     [switch]$SkipWinget,
     [switch]$SkipScoop,
+    [switch]$SkipApps,
+    [switch]$AppsOnly,
+    [switch]$ExportApps,
+    [switch]$DryRun,
     [switch]$PruneProfiles,
     [switch]$SyncProfiles,
     [switch]$Force,
@@ -68,6 +99,8 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoSettings = Join-Path $RepoRoot 'settings.json'
 $IsPS7        = $PSVersionTable.PSVersion.Major -ge 6
+$IsAdmin      = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # 老版本 .NET 默认可能不启用 TLS 1.2，下载 GitHub 会失败
 try {
@@ -283,6 +316,319 @@ function Set-ScoopConfig {
     }
 }
 
+# ---------------------------------------------------------------------------
+# 软件清单：先配齐 bucket，再装 scoop 包，最后用 winget 补 scoop 没有的
+# ---------------------------------------------------------------------------
+$PackageManifest = Join-Path $RepoRoot 'assets\packages.json'
+
+function Get-PackageManifest {
+    if (-not (Test-Path $PackageManifest)) { return $null }
+    try {
+        return (Get-Content $PackageManifest -Raw -Encoding UTF8 | ConvertFrom-Json)
+    } catch {
+        Write-Bad "packages.json 解析失败：$($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-ScoopRoot {
+    if ($env:SCOOP -and (Test-Path $env:SCOOP)) { return $env:SCOOP.TrimEnd('\') }
+    $c = Get-Command scoop -ErrorAction SilentlyContinue
+    if ($c) { return (Split-Path -Parent (Split-Path -Parent $c.Source)) }
+    return (Join-Path $env:USERPROFILE 'scoop')
+}
+
+function Refresh-SessionPath {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' +
+                [Environment]::GetEnvironmentVariable('Path', 'Machine')
+}
+
+function Ensure-Git {
+    # scoop 的 bucket 本质是 git 仓库，没有 git 连 bucket 都加不了
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Ok "git 已就绪：$((Get-Command git).Source)"
+        return $true
+    }
+
+    $winget = Find-Winget
+    if ($winget) {
+        Write-Note '未检测到 git，先通过 winget 安装'
+        & $winget install --id Git.Git -e --silent --no-upgrade `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 97) {
+            Refresh-SessionPath
+            if (Get-Command git -ErrorAction SilentlyContinue) {
+                Write-Ok 'git 安装完成'
+                return $true
+            }
+        }
+    }
+
+    # 回退：MinGit 便携版，免安装免管理员
+    Write-Note '改用 MinGit 便携版'
+    try {
+        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' `
+            -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+        $asset = $rel.assets | Where-Object { $_.name -like 'MinGit-*-64-bit.zip' } | Select-Object -First 1
+        if (-not $asset) { throw '未找到 MinGit 资源' }
+
+        $zip = Join-Path $env:TEMP 'MinGit.zip'
+        Write-Note "下载 $($asset.name)（约 $([math]::Round($asset.size/1MB)) MB）"
+        Get-RemoteFile -Uri $asset.browser_download_url -OutFile $zip
+
+        $dst = Join-Path $env:LOCALAPPDATA 'Programs\MinGit'
+        if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $dst -Force
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+
+        $gitCmd = Join-Path $dst 'cmd'
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($userPath -notlike "*$gitCmd*") {
+            [Environment]::SetEnvironmentVariable('Path', "$userPath;$gitCmd", 'User')
+        }
+        $env:Path = "$env:Path;$gitCmd"
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            Write-Ok "git 便携版就绪：$gitCmd"
+            return $true
+        }
+        throw '解压后仍找不到 git.exe'
+    } catch {
+        Write-Bad "git 自动安装失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Ensure-ScoopBuckets {
+    param($Manifest)
+    if (-not $Manifest) { return }
+    if (@($Manifest.buckets).Count -eq 0) { return }
+
+    $bdir = Join-Path (Get-ScoopRoot) 'buckets'
+    $have = @()
+    if (Test-Path $bdir) {
+        $have = @(Get-ChildItem $bdir -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    }
+
+    $added = 0
+    $failed = @()
+    $missing = @($Manifest.buckets | Where-Object { $have -notcontains $_.name })
+
+    if ($missing.Count -eq 0) { Write-Ok "bucket 已齐全（$($have.Count) 个）"; return }
+    if ($DryRun) {
+        Write-Note ("将添加 {0} 个 bucket：{1}" -f $missing.Count, (($missing | ForEach-Object { $_.name }) -join ', '))
+        return
+    }
+
+    foreach ($b in $missing) {
+        Write-Note "添加 bucket：$($b.name)"
+        & scoop bucket add $b.name $b.source 2>&1 | Out-Null
+        # scoop bucket add 不返回可靠的退出码，直接看目录有没有建出来
+        if (Test-Path (Join-Path $bdir $b.name)) { $added++ } else { $failed += $b.name }
+    }
+
+    if ($failed.Count -gt 0) {
+        Write-Bad ("bucket 添加失败：" + ($failed -join ', '))
+        Write-Note '通常是网络问题，重跑本脚本会重试缺失的 bucket'
+    }
+    if ($added -eq 0) { Write-Ok "bucket 已齐全（$($have.Count) 个）" }
+    else { Write-Ok "已补充 $added 个 bucket" }
+}
+
+function Install-ScoopPackages {
+    param($Manifest)
+    if (-not $Manifest) { return }
+    if (@($Manifest.scoop).Count -eq 0) { Write-Ok '清单里没有 scoop 软件'; return }
+
+    $adir = Join-Path (Get-ScoopRoot) 'apps'
+    $have = @()
+    if (Test-Path $adir) {
+        # 有 current 链接才算真装上了（装失败的残留只有版本目录）
+        $have = @(Get-ChildItem $adir -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { Test-Path (Join-Path $_.FullName 'current') } |
+                  Select-Object -ExpandProperty Name)
+    }
+
+    $todo = @($Manifest.scoop | Where-Object { $have -notcontains $_ })
+    if ($todo.Count -eq 0) {
+        Write-Ok "scoop 软件已全部安装（$($have.Count) 个）"
+        return
+    }
+
+    Write-Note "scoop 待安装 $($todo.Count) 个（已装 $($have.Count) 个）"
+    if ($DryRun) {
+        Write-Note ("将安装：{0}" -f ($todo -join ', '))
+        return
+    }
+
+    $failed = @()
+    $i = 0
+    foreach ($a in $todo) {
+        $i++
+        Write-Host ("    [{0}/{1}] {2}" -f $i, $todo.Count, $a) -ForegroundColor DarkGray
+        $log = & scoop install $a 2>&1 | Out-String
+        # 装没装上看 current 链接，不看退出码（scoop 是 PS 函数，退出码不可靠）
+        if (-not (Test-Path (Join-Path $adir $a))) {
+            $failed += $a
+            $tail = ($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' / '
+            if ($tail) { Write-Host "        $tail" -ForegroundColor DarkYellow }
+        }
+    }
+
+    if ($failed.Count -eq 0) { Write-Ok 'scoop 软件安装完成' }
+    else {
+        Write-Bad ("scoop 安装失败 $($failed.Count) 个：" + ($failed -join ', '))
+        Write-Note '可以单独重试，例如：scoop install <名字>'
+    }
+}
+
+function Install-WingetPackages {
+    param($Manifest)
+    if (-not $Manifest) { return }
+    if (@($Manifest.winget).Count -eq 0) { Write-Ok '清单里没有 winget 软件'; return }
+
+    $winget = Find-Winget
+    if (-not $winget) { Write-Note 'winget 不可用，跳过 winget 软件'; return }
+
+    if ($DryRun) {
+        Write-Note ("将安装 {0} 个 winget 包：{1}" -f $Manifest.winget.Count, ($Manifest.winget -join ', '))
+        return
+    }
+
+    $failed  = @()
+    $skipped = 0
+    $i = 0
+    foreach ($id in $Manifest.winget) {
+        $i++
+        Write-Host ("    [{0}/{1}] {2}" -f $i, $Manifest.winget.Count, $id) -ForegroundColor DarkGray
+        # --no-upgrade 很关键：否则已装的包会被当成"升级"，遇到正在运行的程序
+        # 会报 0x80070020 文件占用而失败，还会白白耗掉几分钟。
+        & $winget install --id $id -e --silent --no-upgrade `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+        # winget 表示"已装过"的返回值不止一个：
+        #   97          = 已安装同版本，主动取消
+        #   -1978335135 = 0x8A150061 APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED
+        switch ($LASTEXITCODE) {
+            0           { }
+            97          { $skipped++ }
+            -1978335135 { $skipped++ }
+            default     { $failed += ('{0} (exit {1})' -f $id, $LASTEXITCODE) }
+        }
+    }
+
+    if ($failed.Count -eq 0) {
+        Write-Ok "winget 软件就绪（跳过已装 $skipped 个）"
+    } else {
+        Write-Bad "winget 安装失败 $($failed.Count) 个："
+        foreach ($f in $failed) { Write-Host "        - $f" -ForegroundColor Red }
+        if (-not $IsAdmin) {
+            Write-Note '多数 winget 包需要管理员权限，可运行  .\setup.ps1 -Elevate  重试'
+        }
+    }
+}
+
+function Export-PackageManifest {
+    # 把当前机器实际装的软件导回 assets/packages.json，方便以后同步仓库
+    $root  = Get-ScoopRoot
+    $bdir  = Join-Path $root 'buckets'
+    $adir  = Join-Path $root 'apps'
+
+    $buckets = @()
+    if (Test-Path $bdir) {
+        foreach ($d in Get-ChildItem $bdir -Directory -ErrorAction SilentlyContinue) {
+            $remote = $null
+            try {
+                Push-Location $d.FullName
+                $remote = (& git config --get remote.origin.url 2>$null | Select-Object -First 1)
+            } catch { } finally { Pop-Location }
+            if ($remote) { $buckets += [pscustomobject]@{ name = $d.Name; source = $remote } }
+        }
+    }
+
+    $apps = @()
+    if (Test-Path $adir) {
+        # 只认"装成功"的应用：scoop 会给装好的应用建 current 链接，
+        # 装失败（比如网络断掉）只留一个版本目录，没有 current。
+        # scoop 自身也在 apps 里，要排除。
+        $apps = @(Get-ChildItem $adir -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -ne 'scoop' -and (Test-Path (Join-Path $_.FullName 'current')) } |
+                  Select-Object -ExpandProperty Name | Sort-Object)
+    }
+
+    # winget 侧只保留"用户主动装的软件"，系统运行库/框架一律剔除
+    $skipPattern = '^(Microsoft\.VCRedist|Microsoft\.VCLibs|Microsoft\.WindowsAppRuntime|' +
+                   'Microsoft\.DotNet|Microsoft\.AppInstaller|Microsoft\.Edge|Microsoft\.Office|' +
+                   'Microsoft\.WSL|Canonical\.Ubuntu|Apple\.Bonjour)'
+    $wingetIds = @()
+    $winget = Find-Winget
+    if ($winget) {
+        $tmp = Join-Path $env:TEMP ("winget-export-" + [guid]::NewGuid().ToString('N') + ".json")
+        try {
+            & $winget export -o $tmp --accept-source-agreements 2>&1 | Out-Null
+            if (Test-Path $tmp) {
+                $j = Get-Content $tmp -Raw -Encoding UTF8 | ConvertFrom-Json
+                $wingetIds = @($j.Sources[0].Packages |
+                    Select-Object -ExpandProperty PackageIdentifier |
+                    Where-Object { $_ -and $_ -notmatch $skipPattern } |
+                    Sort-Object -Unique)
+            }
+        } catch {
+            Write-Note "winget 导出失败：$($_.Exception.Message)"
+        } finally {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # 同一个软件如果 scoop 里已经装了，就不要再列到 winget，避免两边重复
+    $wingetDupeOfScoop = @{
+        'FastCopy.FastCopy'       = 'fastcopy'
+        'JanDeDobbeleer.OhMyPosh' = 'oh-my-posh'
+        'Tencent.TIM'             = 'tim'
+        'Tencent.WeChat'          = 'wechat'
+        'Microsoft.PowerToys'     = 'powertoys'
+        'voidtools.Everything'    = 'everything'
+        'Obsidian.Obsidian'       = 'obsidian'
+        '7zip.7zip'               = '7zip'
+        'Git.Git'                 = 'git'
+        'Neovim.Neovim'           = 'neovim'
+        'GoLang.Go'               = 'go'
+        'Pandoc.Pandoc'           = 'pandoc'
+        'Python.Python.3.13'      = 'python'
+    }
+    $wingetIds = @($wingetIds | Where-Object {
+        $k = $_
+        -not ($wingetDupeOfScoop.ContainsKey($k) -and ($apps -contains $wingetDupeOfScoop[$k]))
+    })
+
+    # winget export 只能识别"它自己装过"的包，用安装程序手动装的（Chrome、
+    # Firefox、夸克、迅雷之类）会整个丢失。所以和旧清单取并集，保住手工补的条目。
+    $oldIds = @()
+    if (Test-Path $PackageManifest) {
+        try {
+            $old = Get-Content $PackageManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($old.winget) { $oldIds = @($old.winget) }
+        } catch { }
+    }
+    $onlyOld = @($oldIds | Where-Object { $wingetIds -notcontains $_ })
+    $wingetIds = @(($wingetIds + $oldIds) | Sort-Object -Unique)
+
+    $obj = [pscustomobject]@{
+        buckets = $buckets
+        scoop   = $apps
+        winget  = $wingetIds
+    }
+    $json = $obj | ConvertTo-Json -Depth 6
+    [IO.File]::WriteAllText($PackageManifest, $json, (New-Object System.Text.UTF8Encoding $false))
+
+    Write-Ok "已写入 $PackageManifest"
+    Write-Host ("    bucket {0} 个 / scoop {1} 个 / winget {2} 个" -f `
+        $buckets.Count, $apps.Count, $wingetIds.Count) -ForegroundColor DarkGray
+    if ($onlyOld.Count -gt 0) {
+        Write-Note ("winget 识别不出、但保留在清单里的 $($onlyOld.Count) 个：")
+        Write-Host ("        " + ($onlyOld -join ', ')) -ForegroundColor DarkGray
+    }
+    Write-Note '检查无误后用 sync.ps1 -Push 提交'
+}
+
 function Install-WindowsTerminal {
     # 优先 winget
     $winget = Find-Winget
@@ -333,16 +679,64 @@ Add-AppxPackage -Path '$bundle' -ErrorAction Stop
 }
 
 # ---------------------------------------------------------------------------
-# 依赖工具：winget / scoop
+# 依赖工具：winget / git / scoop，以及软件安装
 # ---------------------------------------------------------------------------
-if (-not $SkipWinget) {
-    Write-Step '检查 winget'
-    $null = Ensure-Winget
+if ($ExportApps) {
+    Write-Step '导出本机软件清单'
+    Export-PackageManifest
+    exit 0
 }
 
+if (-not $SkipWinget) {
+    Write-Step '检查 winget'
+    if ($DryRun) {
+        if (Find-Winget) { Write-Ok 'winget 已就绪' } else { Write-Note 'winget 未安装，正式运行时会自动装' }
+    } else {
+        $null = Ensure-Winget
+    }
+}
+
+$scoopReady = $false
 if (-not $SkipScoop) {
-    Write-Step '检查 scoop'
-    if (Ensure-Scoop) { Set-ScoopConfig }
+    if ($DryRun) {
+        Write-Step '检查 git / scoop'
+        if (Get-Command git -ErrorAction SilentlyContinue) { Write-Ok 'git 已就绪' }
+        else { Write-Note 'git 未安装，正式运行时会自动装' }
+        if (Get-Command scoop -ErrorAction SilentlyContinue) { Write-Ok 'scoop 已就绪'; $scoopReady = $true }
+        else { Write-Note 'scoop 未安装，正式运行时会自动装' }
+    } else {
+        Write-Step '检查 git'
+        $null = Ensure-Git
+
+        Write-Step '检查 scoop'
+        if (Ensure-Scoop) {
+            Set-ScoopConfig
+            $scoopReady = $true
+        }
+    }
+}
+
+if (-not $SkipApps) {
+    $mf = Get-PackageManifest
+    if (-not $mf) {
+        Write-Note 'assets/packages.json 不存在或无法解析，跳过软件安装'
+    } else {
+        if ($scoopReady) {
+            Write-Step '配置 scoop bucket'
+            Ensure-ScoopBuckets -Manifest $mf
+
+            Write-Step '安装 scoop 软件'
+            Install-ScoopPackages -Manifest $mf
+        }
+        Write-Step '安装 winget 软件'
+        Install-WingetPackages -Manifest $mf
+    }
+}
+
+if ($AppsOnly) {
+    Write-Host ''
+    Write-Step '完成（-AppsOnly，未改动 Windows Terminal 配置）'
+    exit 0
 }
 
 Write-Step '检查 Windows Terminal'
@@ -440,9 +834,6 @@ function Test-SymlinkAbility {
     }
 }
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
-
 $canLink = $false
 if (-not $Copy) { $canLink = Test-SymlinkAbility }
 
@@ -455,13 +846,19 @@ function Show-LinkHint {
 }
 
 if ($Elevate -and -not $canLink -and -not $Copy) {
-    if ($isAdmin) {
+    if ($IsAdmin) {
         Write-Note '当前已是管理员，仍无符号链接权限，可能被组策略限制，将使用复制模式。'
     } else {
         Write-Step '请求管理员权限重启脚本'
-        Start-Process powershell -Verb RunAs -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`""
-        )
+        # 把当前用到的开关原样带过去，避免提权后变成"裸跑"
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+        foreach ($s in 'Copy', 'SkipBackground', 'SkipFont', 'SkipTerminal', 'SkipWinget',
+                       'SkipScoop', 'SkipApps', 'AppsOnly', 'PruneProfiles', 'SyncProfiles', 'Force') {
+            $v = Get-Variable -Name $s -ValueOnly -ErrorAction SilentlyContinue
+            if ($v) { $argList += "-$s" }
+        }
+        $argList += '-Elevate'
+        Start-Process powershell -Verb RunAs -ArgumentList $argList
         exit 0
     }
 }
