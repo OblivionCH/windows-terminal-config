@@ -412,7 +412,7 @@ function Install-NerdFont {
     if (-not (Test-Path $fontDir)) { New-Item -ItemType Directory -Path $fontDir -Force | Out-Null }
     if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
 
-    Write-Note '下载 Meslo Nerd Font（约 20 MB）'
+    Write-Note '下载 Meslo Nerd Font（约 60 MB）'
     Get-RemoteFile -Uri 'https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip' -OutFile $zip
 
     Expand-Archive -Path $zip -DestinationPath $extract -Force
