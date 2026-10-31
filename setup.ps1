@@ -94,8 +94,21 @@ function Invoke-InPS51 {
 
 function Get-RemoteFile {
     param([string]$Uri, [string]$OutFile)
-    $p = @{ Uri = $Uri; OutFile = $OutFile; UseBasicParsing = $true; TimeoutSec = 600 }
-    Invoke-WebRequest @p
+    # 直连 GitHub 在国内经常超时，失败时自动切到加速镜像
+    $attempts = @($Uri)
+    if ($Uri -like 'https://github.com/*') { $attempts += ('https://gh-proxy.com/' + $Uri) }
+
+    $last = $null
+    foreach ($u in $attempts) {
+        try {
+            Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -TimeoutSec 600
+            return
+        } catch {
+            $last = $_
+            Write-Note "下载失败（$($u.Substring(0, [Math]::Min(40, $u.Length)))...），换备用源重试"
+        }
+    }
+    throw $last
 }
 
 # ---------------------------------------------------------------------------
@@ -112,13 +125,22 @@ function Find-WtExe {
     return $null
 }
 
+function Find-Winget {
+    $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # 刚装好的 winget 可能还没进入当前会话的 PATH
+    $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path $p) { return $p }
+    return $null
+}
+
 function Install-WindowsTerminal {
     # 优先 winget
-    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    $winget = Find-Winget
     if ($winget) {
         Write-Note '通过 winget 安装 Windows Terminal（可能需要几分钟）'
-        & $winget.Source install --id Microsoft.WindowsTerminal -e --silent `
-            --accept-package-agreements --accept-source-agreements 2>&1 | Out-String | Write-Host
+        & $winget install --id Microsoft.WindowsTerminal -e --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String | Write-Host
         if ($LASTEXITCODE -eq 0) { return $true }
         Write-Note "winget 返回 $LASTEXITCODE，改用 msixbundle 安装"
     }
