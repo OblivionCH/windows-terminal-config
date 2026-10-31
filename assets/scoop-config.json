@@ -1,0 +1,12 @@
+{
+  "scoop_repo": "https://mirror.ghproxy.com/github.com/ScoopInstaller/Scoop",
+  "scoop_branch": "master",
+  "aria2-enabled": false,
+  "alias": {
+    "rm": "scoop-rm",
+    "upgrade": "scoop-upgrade",
+    "s": "scoop-s",
+    "i": "scoop-i",
+    "u": "scoop-u"
+  }
+}

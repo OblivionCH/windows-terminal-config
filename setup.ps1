@@ -55,7 +55,10 @@ param(
     [switch]$SkipBackground,
     [switch]$SkipFont,
     [switch]$SkipTerminal,
+    [switch]$SkipWinget,
+    [switch]$SkipScoop,
     [switch]$PruneProfiles,
+    [switch]$SyncProfiles,
     [switch]$Force,
     [switch]$Verify,
     [switch]$Elevate
@@ -145,6 +148,141 @@ function Find-Winget {
     return $null
 }
 
+# ---------------------------------------------------------------------------
+# 依赖工具：winget / scoop 缺失时自动安装
+# ---------------------------------------------------------------------------
+function Ensure-Winget {
+    $wg = Find-Winget
+    if ($wg) { Write-Ok "winget 已就绪：$wg"; return $wg }
+
+    Write-Note '未检测到 winget，开始自动安装（需下载约 300 MB）'
+    $work = Join-Path $env:TEMP 'winget-bootstrap'
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    $bundleUrl = $null
+    $depsUrl   = $null
+
+    try {
+        # 查最新版本；API 不通时回退到内置版本号
+        try {
+            $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
+                -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+            $bundleAsset = $rel.assets | Where-Object { $_.name -like '*8wekyb3d8bbwe.msixbundle' } | Select-Object -First 1
+            $depsAsset   = $rel.assets | Where-Object { $_.name -eq 'DesktopAppInstaller_Dependencies.zip' } | Select-Object -First 1
+            if ($bundleAsset) { $bundleUrl = $bundleAsset.browser_download_url }
+            if ($depsAsset)   { $depsUrl   = $depsAsset.browser_download_url }
+        } catch {
+            Write-Note "查询 winget 版本失败，使用内置版本号"
+        }
+
+        if (-not $bundleUrl) {
+            $v    = 'v1.29.380'
+            $base = "https://github.com/microsoft/winget-cli/releases/download/$v"
+            $bundleUrl = "$base/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+            $depsUrl   = "$base/DesktopAppInstaller_Dependencies.zip"
+        }
+
+        $bundle = Join-Path $work 'appinstaller.msixbundle'
+        Get-RemoteFile -Uri $bundleUrl -OutFile $bundle
+
+        $depDir = Join-Path $work 'deps'
+        if ($depsUrl) {
+            $depsZip = Join-Path $work 'deps.zip'
+            Get-RemoteFile -Uri $depsUrl -OutFile $depsZip
+            Expand-Archive -Path $depsZip -DestinationPath $depDir -Force
+        }
+
+        # Appx 模块只在 Windows PowerShell 5.1 可用，PS7 下必须转交子进程
+        $code = @"
+`$ErrorActionPreference = 'Continue'
+Get-ChildItem '$depDir\x64' -Filter *.appx -ErrorAction SilentlyContinue | ForEach-Object {
+    try { Add-AppxPackage -Path `$_.FullName -ErrorAction Stop } catch { }
+}
+Add-AppxPackage -Path '$bundle' -ErrorAction Stop
+"@
+        Invoke-InPS51 -Code $code | Out-Null
+    } catch {
+        Write-Bad "winget 自动安装失败：$($_.Exception.Message)"
+    } finally {
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $wg = Find-Winget
+    if ($wg) { Write-Ok "winget 安装完成：$wg" }
+    else { Write-Note 'winget 仍不可用，后续步骤会走不依赖它的路径' }
+    return $wg
+}
+
+function Ensure-Scoop {
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        Write-Ok 'scoop 已就绪'
+        return $true
+    }
+
+    Write-Note '未检测到 scoop，开始自动安装'
+    try {
+        $code = @'
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+Invoke-Expression (New-Object Net.WebClient).DownloadString("https://get.scoop.sh")
+'@
+        & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command $code 2>&1 | Out-Null
+    } catch {
+        Write-Note "scoop 安装脚本执行异常：$($_.Exception.Message)"
+    }
+
+    # 刷新当前会话 PATH，让新装的 scoop 立即可见
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        Write-Ok 'scoop 安装完成'
+        return $true
+    }
+    Write-Note 'scoop 仍不可用'
+    return $false
+}
+
+function Set-ScoopConfig {
+    $src = Join-Path $RepoRoot 'assets\scoop-config.json'
+    if (-not (Test-Path $src)) { return }
+
+    $dst = Join-Path $env:USERPROFILE '.config\scoop\config.json'
+    $dir = Split-Path -Parent $dst
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    if (-not (Test-Path $dst)) {
+        Copy-Item $src $dst -Force
+        Write-Ok "scoop 配置已写入：$dst"
+        return
+    }
+
+    # 已存在时只补充缺失的键，绝不覆盖本机已有设置
+    # （gh_token、proxy 这类本机专属且敏感的项必须保留原样）
+    try {
+        $cur = Get-Content $dst -Raw -Encoding UTF8 | ConvertFrom-Json
+        $new = Get-Content $src -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-Note "scoop 配置解析失败，跳过：$($_.Exception.Message)"
+        return
+    }
+
+    $changed = $false
+    foreach ($p in $new.PSObject.Properties) {
+        if ($cur.PSObject.Properties.Name -notcontains $p.Name) {
+            $cur | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+            $changed = $true
+        }
+    }
+
+    if ($changed) {
+        Copy-Item $dst "$dst.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $json = $cur | ConvertTo-Json -Depth 10
+        [IO.File]::WriteAllText($dst, $json, (New-Object System.Text.UTF8Encoding $false))
+        Write-Ok 'scoop 配置已补充缺失项（原有设置保留）'
+    } else {
+        Write-Ok 'scoop 配置已包含所需项'
+    }
+}
+
 function Install-WindowsTerminal {
     # 优先 winget
     $winget = Find-Winget
@@ -192,6 +330,19 @@ Add-AppxPackage -Path '$bundle' -ErrorAction Stop
         Write-Bad "自动安装失败：$($_.Exception.Message)"
         return $false
     }
+}
+
+# ---------------------------------------------------------------------------
+# 依赖工具：winget / scoop
+# ---------------------------------------------------------------------------
+if (-not $SkipWinget) {
+    Write-Step '检查 winget'
+    $null = Ensure-Winget
+}
+
+if (-not $SkipScoop) {
+    Write-Step '检查 scoop'
+    if (Ensure-Scoop) { Set-ScoopConfig }
 }
 
 Write-Step '检查 Windows Terminal'
@@ -406,30 +557,43 @@ function Test-MesloInstalled {
 
 function Install-NerdFont {
     $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-    $zip     = Join-Path $env:TEMP 'Meslo.zip'
-    $extract = Join-Path $env:TEMP 'MesloFont'
-
     if (-not (Test-Path $fontDir)) { New-Item -ItemType Directory -Path $fontDir -Force | Out-Null }
-    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
 
-    Write-Note '下载 Meslo Nerd Font（约 60 MB）'
-    Get-RemoteFile -Uri 'https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip' -OutFile $zip
+    # 优先用仓库内置字体（assets\fonts），仓库里没有才联网下载兜底
+    $bundled = Join-Path $RepoRoot 'assets\fonts'
+    $ttfs    = @()
+    $cleanup = @()
 
-    Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $ttfs = @(Get-ChildItem $extract -Filter '*.ttf' -Recurse)
-    if (-not $ttfs) { throw '压缩包里没有找到 ttf 文件' }
+    if (Test-Path $bundled) {
+        $ttfs = @(Get-ChildItem $bundled -Filter '*.ttf' -Recurse)
+    }
 
-    # 只安装配置里实际用到的字体族，避免把 Meslo 全套二十多个文件都塞进系统
-    $wanted = $null
-    try {
-        $cfg = Get-Content $RepoSettings -Raw -Encoding UTF8 | ConvertFrom-Json
-        $face = ($cfg.profiles.list | Where-Object { $_.font -and $_.font.face } | Select-Object -First 1).font.face
-        if ($face) { $wanted = ($face -replace '\s', '') }
-    } catch { }
+    if ($ttfs.Count -gt 0) {
+        Write-Ok "使用仓库内置字体：$($ttfs.Count) 个文件（无需联网）"
+    } else {
+        Write-Note '仓库未内置字体，改为联网下载 Meslo（约 60 MB）'
+        $zip     = Join-Path $env:TEMP 'Meslo.zip'
+        $extract = Join-Path $env:TEMP 'MesloFont'
+        if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
 
-    if ($wanted) {
-        $matched = @($ttfs | Where-Object { ($_.BaseName -replace '\s', '') -like "$wanted*" })
-        if ($matched.Count -gt 0) { $ttfs = $matched }
+        Get-RemoteFile -Uri 'https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip' -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath $extract -Force
+        $ttfs = @(Get-ChildItem $extract -Filter '*.ttf' -Recurse)
+        if (-not $ttfs) { throw '压缩包里没有找到 ttf 文件' }
+        $cleanup = @($zip, $extract)
+
+        # 下载的是 Meslo 全套，只取配置里实际用到的字体族
+        $wanted = $null
+        try {
+            $cfg = Get-Content $RepoSettings -Raw -Encoding UTF8 | ConvertFrom-Json
+            $face = ($cfg.profiles.list | Where-Object { $_.font -and $_.font.face } | Select-Object -First 1).font.face
+            if ($face) { $wanted = ($face -replace '\s', '') }
+        } catch { }
+
+        if ($wanted) {
+            $matched = @($ttfs | Where-Object { ($_.BaseName -replace '\s', '') -like "$wanted*" })
+            if ($matched.Count -gt 0) { $ttfs = $matched }
+        }
     }
 
     # 注册字体所需的 P/Invoke
@@ -467,8 +631,7 @@ public class WinFont {
     # 通知其他窗口字体已变化
     [void][WinFont]::SendMessage([IntPtr]0xffff, 0x001D, [IntPtr]::Zero, [IntPtr]::Zero)
 
-    Remove-Item $zip -Force -ErrorAction SilentlyContinue
-    Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($c in $cleanup) { Remove-Item $c -Recurse -Force -ErrorAction SilentlyContinue }
     return $installed
 }
 
@@ -491,6 +654,29 @@ if (-not $SkipFont) {
 # ---------------------------------------------------------------------------
 # 8. WSL profile 检查
 # ---------------------------------------------------------------------------
+# Windows Terminal 生成动态 profile GUID 用的命名空间（见源码 DynamicProfileUtils.h）。
+# 注意 name 必须按 UTF-16LE 取字节，否则算出的 GUID 与终端自己生成的对应不上，
+# 会导致同一个发行版在列表里出现两次。
+$script:WtProfileNamespace = '2bde4a90-d05f-401c-9492-e40884ead1d8'
+
+function New-V5Uuid {
+    param([string]$Namespace, [string]$Name)
+    $g = [guid]$Namespace
+    $b = $g.ToByteArray()
+    # .NET Guid 前 3 段是小端，转成 RFC 4122 网络字节序
+    [byte[]]$ns = @($b[3],$b[2],$b[1],$b[0], $b[5],$b[4], $b[7],$b[6],
+                    $b[8],$b[9],$b[10],$b[11],$b[12],$b[13],$b[14],$b[15])
+    [byte[]]$nb = [Text.Encoding]::Unicode.GetBytes($Name)
+    [byte[]]$data = New-Object byte[] ($ns.Length + $nb.Length)
+    [Array]::Copy($ns, 0, $data, 0, $ns.Length)
+    [Array]::Copy($nb, 0, $data, $ns.Length, $nb.Length)
+    $h = [Security.Cryptography.SHA1]::Create().ComputeHash($data)
+    $h[6] = ($h[6] -band 0x0F) -bor 0x50
+    $h[8] = ($h[8] -band 0x3F) -bor 0x80
+    $hex = ($h[0..15] | ForEach-Object { $_.ToString('x2') }) -join ''
+    '{0}-{1}-{2}-{3}-{4}' -f $hex.Substring(0,8), $hex.Substring(8,4), $hex.Substring(12,4), $hex.Substring(16,4), $hex.Substring(20,12)
+}
+
 function Get-WslDistros {
     # 优先读注册表：不依赖 wsl.exe，没有输出编码问题，也不受执行策略影响
     $names = @()
@@ -544,8 +730,8 @@ function Test-DistroPresent {
 Write-Step '检查 WSL profile'
 try {
     $settings = Get-Content $targetFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    $distros  = Get-WslDistros
-    if ($distros.Count -gt 0) { Write-Ok ("已安装的 WSL 发行版：" + ($distros -join ', ')) }
+    $distros  = @(Get-WslDistros)
+    if ($distros.Count -gt 0) { Write-Ok ("宿主机已安装：" + ($distros -join ', ')) }
     else { Write-Note '本机没有检测到任何 WSL 发行版' }
 
     $wslProfiles = @()
@@ -555,31 +741,57 @@ try {
         })
     }
 
-    if ($wslProfiles.Count -eq 0) {
-        Write-Ok '配置里没有 WSL profile'
-    } else {
-        $missing = @($wslProfiles | Where-Object { -not (Test-DistroPresent -ProfileName $_.name -Distros $distros) })
-        if ($missing.Count -eq 0) {
-            Write-Ok "全部 $($wslProfiles.Count) 个 WSL profile 在本机都能打开"
-        } else {
-            Write-Note "以下 $($missing.Count) 个 profile 在本机找不到对应发行版，标签页会存在但打不开："
-            foreach ($m in $missing) { Write-Host "        - $($m.name)  (source: $($m.source))" -ForegroundColor DarkYellow }
+    # 配置里有、宿主机没有 → 无效
+    $invalid = @($wslProfiles | Where-Object { -not (Test-DistroPresent -ProfileName $_.name -Distros $distros) })
 
-            if ($PruneProfiles) {
-                if ((Get-LinkState -Path $targetFile -Source $RepoSettings) -eq 'linked-ok' -and -not $Force) {
-                    Write-Note '当前是符号链接模式，裁剪会直接修改仓库文件。确认请加 -Force 重跑。'
-                } else {
-                    $keep = @($settings.profiles.list | Where-Object {
-                        $missing.guid -notcontains $_.guid
-                    })
-                    $settings.profiles.list = $keep
-                    $json = $settings | ConvertTo-Json -Depth 32
-                    [IO.File]::WriteAllText($targetFile, $json, (New-Object System.Text.UTF8Encoding $false))
-                    Write-Ok "已移除 $($missing.Count) 个无效 profile"
-                }
+    # 宿主机有、配置里没有 → 缺失
+    $absent = @()
+    foreach ($d in $distros) {
+        $hit = $wslProfiles | Where-Object { Test-DistroPresent -ProfileName $_.name -Distros @($d) }
+        if (-not $hit) { $absent += $d }
+    }
+
+    if ($invalid.Count -eq 0 -and $absent.Count -eq 0) {
+        Write-Ok "配置与宿主机一致（$($wslProfiles.Count) 个 WSL profile）"
+    } else {
+        if ($invalid.Count -gt 0) {
+            Write-Note "配置里有 $($invalid.Count) 个 profile 在本机找不到对应发行版："
+            foreach ($m in $invalid) { Write-Host "        - $($m.name)" -ForegroundColor DarkYellow }
+        }
+        if ($absent.Count -gt 0) {
+            Write-Note "本机有 $($absent.Count) 个发行版还没写进配置："
+            foreach ($d in $absent) { Write-Host "        + $d" -ForegroundColor DarkCyan }
+            Write-Note '它们目前由 Windows Terminal 自动以默认样式显示（newTabMenu 里的 remainingProfiles）。'
+        }
+
+        $doPrune = $PruneProfiles -or $SyncProfiles
+        $doAdd   = $SyncProfiles
+
+        if (($doPrune -and $invalid.Count -gt 0) -or ($doAdd -and $absent.Count -gt 0)) {
+            if ((Get-LinkState -Path $targetFile -Source $RepoSettings) -eq 'linked-ok' -and -not $Force) {
+                Write-Note '当前是符号链接模式，同步会直接改到仓库文件。确认请加 -Force 重跑。'
             } else {
-                Write-Note '想让它们自动消失，可加 -PruneProfiles 重跑；也可以稍后在终端设置里手动隐藏。'
+                $list = @($settings.profiles.list)
+                if ($doPrune) {
+                    $list = @($list | Where-Object { $invalid.guid -notcontains $_.guid })
+                }
+                if ($doAdd) {
+                    foreach ($d in $absent) {
+                        $list += [pscustomobject]@{
+                            guid   = '{' + (New-V5Uuid -Namespace $script:WtProfileNamespace -Name $d) + '}'
+                            name   = $d
+                            source = 'Windows.Terminal.Wsl'
+                            hidden = $false
+                        }
+                    }
+                }
+                $settings.profiles.list = $list
+                $json = $settings | ConvertTo-Json -Depth 32
+                [IO.File]::WriteAllText($targetFile, $json, (New-Object System.Text.UTF8Encoding $false))
+                Write-Ok ("已同步：删除 {0} 个、新增 {1} 个" -f $invalid.Count, $absent.Count)
             }
+        } else {
+            Write-Note '想让配置与本机一致，加 -SyncProfiles -Force 重跑。'
         }
     }
 } catch {
