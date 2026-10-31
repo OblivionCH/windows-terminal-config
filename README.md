@@ -12,6 +12,7 @@
 | `assets/fonts/` | Meslo Nerd Font（4 个 ttf，安装时无需联网） |
 | `assets/scoop-config.json` | Scoop 配置（已脱敏，不含 token） |
 | `setup.ps1` | 一键部署脚本 |
+| `update.ps1` | 一键更新脚本（scoop + winget 统一入口） |
 | `sync.ps1` | git 拉取 / 推送的便捷封装 |
 
 ## 在新机器上部署
@@ -208,7 +209,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 .\setup.ps1 -DryRun        # 预览会装哪些软件，不动系统
 .\setup.ps1 -ExportApps    # 把本机软件导回 packages.json
 .\setup.ps1 -SyncProfiles -Force   # 按本机实际情况同步 WSL profile
+.\update.ps1               # 看 scoop / winget 各有哪些更新，不动系统
+.\update.ps1 -Apply        # 真的升级
 ```
+
+`update.ps1` 是更新软件的唯一入口，默认只报告不改动：
+
+- **scoop 侧** —— 先 `scoop update` 刷新 scoop 自身和 8 个 bucket，再列可升级项
+- **winget 侧** —— 列可升级项
+- **汇总** —— 两边各几个可更新；加 `-Apply` 才真的升，升完会再扫一遍，把「程序正在运行 / 需要管理员」导致没升上去的单独列出来
+
+它还会自动摘掉两类「看着像可更新、其实升不了」的条目，免得白等：
+
+| 类别 | 特征 | 处理 |
+| --- | --- | --- |
+| 装失败的残留 | 有版本目录但没有 `current` 链接 | 提示 `scoop uninstall <名>` 后重装 |
+| 孤儿 | `install.json` 里记的 bucket 已被移除，且没有任何现存 bucket 有同名包 | 提示换到 winget 或卸载 |
+
+> 注意：如果只是 bucket 被删、但别的 bucket 有同名包（比如 `pixpin` 从 `apps` 迁到了 `dorado`），它不算孤儿，会正常出现在可更新列表里。
+
+`-Apply` 升级 scoop 侧用的是显式名单而不是 `scoop update *`，这样孤儿目录不会刷一屏报错。
 
 装完新软件后同步仓库的标准动作：
 
@@ -300,6 +320,54 @@ git config --global http.schannelCheckRevoke false
 **背景图不显示**
 
 确认 `%USERPROFILE%\Pictures\2.jpg` 存在；目标机已有同名文件时脚本默认不覆盖，需要 `.\setup.ps1 -Force`。
+
+**`scoop reset` / `scoop uninstall` 说「是全局应用，需要管理员」，但明明没装过全局包**
+
+`SCOOP_GLOBAL` 被设成了和 `SCOOP` 同一个路径。scoop 判断「是否全局应用」靠的是路径比对，两个变量指向同一处时所有本地应用都会被误判成全局的。
+
+```powershell
+[Environment]::GetEnvironmentVariable('SCOOP_GLOBAL','Machine')   # 看机器级的值
+```
+
+要么管理员 PowerShell 里删掉这个机器级变量（让 scoop 回落到默认的 `C:\ProgramData\scoop`），要么给当前用户设一个不冲突的值：
+
+```powershell
+[Environment]::SetEnvironmentVariable('SCOOP_GLOBAL','C:\ProgramData\scoop','User')
+```
+
+用户级变量会覆盖机器级，改完重开终端生效。
+
+**`scoop update` 报 `Uncommitted changes detected. Update aborted.`**
+
+scoop 自身是个 git 仓库（`$env:SCOOP\apps\scoop\current`），本地文件被改过就会拒绝自我更新。看是哪些文件、改了什么：
+
+```powershell
+git -C "$env:SCOOP\apps\scoop\current" status --short
+git -C "$env:SCOOP\apps\scoop\current" diff --stat
+```
+
+确认没有自己要保留的改动后还原：
+
+```powershell
+git -C "$env:SCOOP\apps\scoop\current" checkout -- .
+```
+
+**`scoop update` 报 `fatal: unable to access 'https://mirror.ghproxy.com/...'`**
+
+scoop 的 `scoop_repo` 配置指向了已经停服的镜像。改回官方地址：
+
+```powershell
+scoop config scoop_repo https://github.com/ScoopInstaller/Scoop
+git -C "$env:SCOOP\apps\scoop\current" remote set-url origin https://github.com/ScoopInstaller/Scoop
+```
+
+**scoop 在代理关掉之后所有操作都失败**
+
+`scoop config proxy` 里写死了代理地址。代理不是常开的话应该删掉，让 scoop 跟着系统代理 / 环境变量走：
+
+```powershell
+scoop config rm proxy
+```
 
 **配置被改坏了**
 

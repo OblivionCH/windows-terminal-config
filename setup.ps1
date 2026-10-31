@@ -32,6 +32,8 @@
 
 .PARAMETER SkipWinget
     不检查、不安装 winget。
+    不加这个参数时 winget 也是惰性的：只有 assets/packages.json 里有 winget
+    条目才会去装它，否则整台机器只保留 scoop 一套工具链。
 
 .PARAMETER SkipScoop
     不检查、不安装 scoop。
@@ -426,6 +428,20 @@ Invoke-Expression (New-Object Net.WebClient).DownloadString("https://get.scoop.s
     return $false
 }
 
+function Test-ScoopEnv {
+    # SCOOP_GLOBAL 和 SCOOP 指向同一处时，scoop 判断"是否全局应用"的路径比对
+    # 恒为真，所有本地应用都会被当成全局的，scoop reset / uninstall 一律要
+    # 管理员。这里只提示，不动用户的系统设置。
+    if (-not $env:SCOOP -or -not $env:SCOOP_GLOBAL) { return }
+    $a = ($env:SCOOP -replace '[\\/]+$', '').ToLowerInvariant()
+    $b = ($env:SCOOP_GLOBAL -replace '[\\/]+$', '').ToLowerInvariant()
+    if ($a -ne $b) { return }
+
+    Write-Note 'SCOOP 和 SCOOP_GLOBAL 指向同一个目录'
+    Write-Host '        后果：scoop 会把所有本地应用当成全局应用，reset / uninstall 一律要管理员' -ForegroundColor DarkGray
+    Write-Host '        修法：管理员 PowerShell 删掉机器级 SCOOP_GLOBAL，或给当前用户设 C:\ProgramData\scoop' -ForegroundColor DarkGray
+}
+
 function Set-ScoopConfig {
     $src = Join-Path $RepoRoot 'assets\scoop-config.json'
     if (-not (Test-Path $src)) { return }
@@ -456,6 +472,14 @@ function Set-ScoopConfig {
             $cur | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
             $changed = $true
         }
+    }
+
+    # 老版本仓库里 scoop_repo 写的是已停服的 mirror.ghproxy.com，照搬过去
+    # 会让人以为网络坏了。这一项定向纠正，其它仍然保留本机设置。
+    if ($cur.PSObject.Properties.Name -contains 'scoop_repo' -and
+        "$($cur.scoop_repo)" -match 'ghproxy|gh-proxy') {
+        $cur.scoop_repo = 'https://github.com/ScoopInstaller/Scoop'
+        $changed = $true
     }
 
     if ($changed) {
@@ -923,9 +947,18 @@ if ($Verify) {
 Write-Step '检查网络'
 Initialize-Network
 
+# 先读清单，决定到底需不需要 winget。
+# 清单里没有 winget 条目时，本机就只保留 scoop 一套工具链，不白下 300 MB。
+$mf = $null
+if (-not $SkipApps) { $mf = Get-PackageManifest }
+$needWinget = ($mf -and @($mf.winget).Count -gt 0)
+
 if (-not $SkipWinget) {
     Write-Step '检查 winget'
-    if ($DryRun) {
+    if (-not $needWinget) {
+        if (Find-Winget) { Write-Ok 'winget 已就绪（清单里没有 winget 软件，不需要它）' }
+        else { Write-Ok '清单里没有 winget 软件，跳过（本机只保留 scoop 一套）' }
+    } elseif ($DryRun) {
         if (Find-Winget) { Write-Ok 'winget 已就绪' } else { Write-Note 'winget 未安装，正式运行时会自动装' }
     } else {
         $null = Ensure-Winget
@@ -938,7 +971,7 @@ if (-not $SkipScoop) {
         Write-Step '检查 git / scoop'
         if (Get-Command git -ErrorAction SilentlyContinue) { Write-Ok 'git 已就绪' }
         else { Write-Note 'git 未安装，正式运行时会自动装' }
-        if (Get-Command scoop -ErrorAction SilentlyContinue) { Write-Ok 'scoop 已就绪'; $scoopReady = $true }
+        if (Get-Command scoop -ErrorAction SilentlyContinue) { Write-Ok 'scoop 已就绪'; $scoopReady = $true; Test-ScoopEnv }
         else { Write-Note 'scoop 未安装，正式运行时会自动装' }
     } else {
         Write-Step '检查 git'
@@ -947,13 +980,13 @@ if (-not $SkipScoop) {
         Write-Step '检查 scoop'
         if (Ensure-Scoop) {
             Set-ScoopConfig
+            Test-ScoopEnv
             $scoopReady = $true
         }
     }
 }
 
 if (-not $SkipApps) {
-    $mf = Get-PackageManifest
     if (-not $mf) {
         Write-Note 'assets/packages.json 不存在或无法解析，跳过软件安装'
     } else {
@@ -964,8 +997,13 @@ if (-not $SkipApps) {
             Write-Step '安装 scoop 软件'
             Install-ScoopPackages -Manifest $mf
         }
-        Write-Step '安装 winget 软件'
-        Install-WingetPackages -Manifest $mf
+        if (@($mf.winget).Count -gt 0) {
+            Write-Step '安装 winget 软件'
+            Install-WingetPackages -Manifest $mf
+        } else {
+            Write-Step '安装 winget 软件'
+            Write-Ok '清单里没有 winget 软件'
+        }
     }
 }
 
