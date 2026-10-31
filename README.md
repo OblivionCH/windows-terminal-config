@@ -62,6 +62,24 @@ $d="$env:USERPROFILE\dotfiles\windows-terminal"; if(Test-Path $d){git -C $d pull
 
 ## 故障排查
 
+**部署时提示「创建符号链接失败：此操作需要管理员权限」，但开发者模式明明是开的**
+
+这是 Windows 的常见坑：开发者模式的注册表开关（`AllowDevelopmentWithoutDevLicense = 1`）只是"允许"，真正决定能否建链接的是当前登录令牌里的 `SeCreateSymbolicLinkPrivilege` 权限。开启开发者模式后**必须重新登录（或重启）**，这个权限才会进入令牌。
+
+当前是否具备权限，可以用这条命令实测：
+
+```powershell
+$p="$env:TEMP\lt"; New-Item -ItemType Directory $p -Force|Out-Null; Set-Content "$p\t.txt" x; try{New-Item -ItemType SymbolicLink -Path "$p\l.txt" -Target "$p\t.txt" -ErrorAction Stop|Out-Null; "可以创建"}catch{"无权限"}; Remove-Item $p -Recurse -Force
+```
+
+解决办法任选其一：
+
+- 重启电脑后重跑 `.\setup.ps1`
+- `.\setup.ps1 -Elevate` 自动请求管理员权限
+- 管理员 PowerShell 里直接跑 `.\setup.ps1`
+
+脚本在拿不到权限时会自动退回复制模式，配置照常可用，只是本机改动不会自动进仓库。
+
 **在 WT 设置界面保存过配置后，`-Verify` 报 "是普通文件而非链接"**
 
 部分 Windows Terminal 版本保存设置时会用临时文件替换原文件，从而把符号链接替换成实体文件。重新跑一次 `.\setup.ps1` 即可恢复链接（脚本会保留当前内容，不会丢改动）。
