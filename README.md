@@ -14,6 +14,8 @@
 | `setup.ps1` | 一键部署脚本 |
 | `update.ps1` | 一键更新脚本（scoop + winget 统一入口） |
 | `sync.ps1` | git 拉取 / 推送的便捷封装 |
+| `lib/common.ps1` | 三个脚本共用的输出函数（Write-Step / Ok / Note / Bad / Indented） |
+| `lib/net.ps1` | 三个脚本共用的网络处理：代理探测、镜像改写、GitHub API、下载、git 镜像重试 |
 
 ## 在新机器上部署
 

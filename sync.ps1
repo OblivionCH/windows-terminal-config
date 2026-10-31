@@ -36,31 +36,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-function Write-Step { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
-function Write-Ok   { param($m) Write-Host "    OK  $m" -ForegroundColor Green }
-function Write-Note { param($m) Write-Host "    !!  $m" -ForegroundColor Yellow }
+# 共用库：输出函数 + 网络处理。sync.ps1 只取里面的 Write-* 与 Invoke-Git，
+# 不调用 Initialize-Network（否则全局 insteadOf 会把 git push 改写到只读镜像）。
+. (Join-Path $PSScriptRoot 'lib\common.ps1')
+. (Join-Path $PSScriptRoot 'lib\net.ps1')
 
-function Invoke-Git {
-    # 直连 github.com 在国内经常失败（502 / TLS 握手失败）。第一次失败后
-    # 用 git 的进程级 insteadOf 把 github.com 改写到 gh-proxy 再试一次，
-    # 不写任何配置文件，进程结束即失效。
-    param([string[]]$Arguments)
-
-    # 输出直接送控制台（Out-Host），不走管道，否则函数返回值会混进 git 的输出
-    & git @Arguments 2>&1 | Out-Host
-    if ($LASTEXITCODE -eq 0) { return 0 }
-
-    Write-Note '直连失败，改走 gh-proxy 镜像重试一次'
-    $env:GIT_CONFIG_COUNT   = '1'
-    $env:GIT_CONFIG_KEY_0   = 'url.https://gh-proxy.com/https://github.com/.insteadOf'
-    $env:GIT_CONFIG_VALUE_0 = 'https://github.com/'
-    try {
-        & git @Arguments 2>&1 | Out-Host
-        return $LASTEXITCODE
-    } finally {
-        Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
-    }
-}
 
 if ($Pull) {
     Write-Step '拉取远程更新'

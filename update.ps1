@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     scoop 与 winget 的统一更新入口。
@@ -56,20 +56,10 @@ $ProgressPreference    = 'SilentlyContinue'
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
-function Write-Step { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
-function Write-Ok   { param($m) Write-Host "    OK  $m" -ForegroundColor Green }
-function Write-Note { param($m) Write-Host "    !!  $m" -ForegroundColor Yellow }
-function Write-Bad  { param($m) Write-Host "    XX  $m" -ForegroundColor Red }
+# 共用库：输出函数 + 网络处理。dot-source 后函数与脚本共享同一 script 作用域。
+. (Join-Path $PSScriptRoot 'lib\common.ps1')
+. (Join-Path $PSScriptRoot 'lib\net.ps1')
 
-function Write-Indented {
-    # 工具输出原样带缩进打印。不解析列宽——scoop/winget 会按终端宽度截断
-    # 名字（"Mani…"），解析出来不可靠，不如把原文交给用户。
-    param($Text, [string]$Color = 'Gray')
-    if (-not $Text) { return }
-    foreach ($line in ($Text -split "`r?`n")) {
-        if ($line.Trim()) { Write-Host "    $line" -ForegroundColor $Color }
-    }
-}
 
 function Get-TableInfo {
     # 把 scoop/winget 的表格输出整理一下：
@@ -152,76 +142,9 @@ function Invoke-Winget {
 }
 
 # ---------------------------------------------------------------------------
-# 网络：与 setup.ps1 里的 Initialize-Network 同一套判断
-# 代理只在本进程内生效，不写任何配置文件
+# 网络处理：已抽到 lib/net.ps1（Get-ProxyCandidate / Test-ProxyAlive /
+# Initialize-Network）。三个脚本共用同一份实现。
 # ---------------------------------------------------------------------------
-function Get-ProxyCandidate {
-    if ($Proxy) { return $Proxy }
-    foreach ($v in 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy') {
-        $val = [Environment]::GetEnvironmentVariable($v)
-        if ($val) { return ($val -replace '^https?://', '') }
-    }
-    try {
-        $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
-        if ($p.ProxyServer) {
-            $s = [string]$p.ProxyServer
-            if ($s -match '=') {
-                $m = [regex]::Match($s, 'https?=([^;]+)')
-                if ($m.Success) { return $m.Groups[1].Value.Trim() }
-            }
-            return $s.Trim()
-        }
-    } catch { }
-    return $null
-}
-
-function Test-ProxyAlive {
-    # 只测端口不够：注册表留着旧地址、只代理内网、需要认证的端口都会通但用不了
-    param([string]$Addr)
-    if (-not $Addr) { return $false }
-    $hp = ($Addr -replace '^https?://', '').TrimEnd('/')
-    $parts = $hp.Split(':')
-    $h = $parts[0]
-    $port = 80
-    if ($parts.Count -gt 1) { [void][int]::TryParse($parts[1], [ref]$port) }
-    if (-not $h -or $port -le 0) { return $false }
-
-    $client = New-Object Net.Sockets.TcpClient
-    try {
-        $ar = $client.BeginConnect($h, $port, $null, $null)
-        if (-not $ar.AsyncWaitHandle.WaitOne(800)) { return $false }
-        $client.EndConnect($ar)
-    } catch { return $false } finally { $client.Close() }
-
-    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    if (-not (Test-Path $curl)) { return $true }
-    $probe = Join-Path $env:TEMP ("proxyprobe-" + [guid]::NewGuid().ToString('N') + ".txt")
-    try {
-        $code = & $curl -k -s -o $probe -w '%{http_code}' -x "http://$hp" --max-time 10 https://github.com 2>$null
-        return ("$code" -match '^[23]')
-    } catch { return $false } finally { Remove-Item $probe -Force -ErrorAction SilentlyContinue }
-}
-
-function Initialize-Network {
-    $cand = Get-ProxyCandidate
-    if ($cand -and (Test-ProxyAlive -Addr $cand)) {
-        $env:HTTP_PROXY  = "http://$cand"
-        $env:HTTPS_PROXY = "http://$cand"
-        Write-Ok "代理 $cand 可用，本次更新走它"
-        return
-    }
-
-    # 没可用代理：先清掉可能残留的坏代理变量（否则 git 还是会去连它），
-    # 再用 git 的 insteadOf 把所有 github.com 请求改写到镜像。
-    # GIT_CONFIG_COUNT 是 git 2.31+ 的机制，只影响当前进程，不写配置文件。
-    foreach ($v in 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy') {
-        Remove-Item "Env:$v" -ErrorAction SilentlyContinue
-    }
-    $env:GIT_CONFIG_COUNT   = '1'
-    $env:GIT_CONFIG_KEY_0   = 'url.https://gh-proxy.com/https://github.com/.insteadOf'
-    $env:GIT_CONFIG_VALUE_0 = 'https://github.com/'
-    Write-Note '没有可用代理，git 的 github.com 请求改走 gh-proxy 镜像'
-}
 
 function Get-ManifestIndex {
     # 所有 bucket 里出现过的 manifest 名。用来判断一个应用还有没有可用的
@@ -319,7 +242,7 @@ $scoopOk     = $true
 $wingetOk    = $true
 
 Write-Step '检查网络'
-Initialize-Network
+Initialize-Network -Proxy $Proxy
 Write-Host ''
 
 # ---------------------------------------------------------------------------

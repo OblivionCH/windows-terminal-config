@@ -117,10 +117,11 @@ try {
 } catch { }
 $ProgressPreference = 'SilentlyContinue'
 
-function Write-Step { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
-function Write-Ok   { param($m) Write-Host "    OK  $m" -ForegroundColor Green }
-function Write-Note { param($m) Write-Host "    !!  $m" -ForegroundColor Yellow }
-function Write-Bad  { param($m) Write-Host "    XX  $m" -ForegroundColor Red }
+# 共用库：输出函数 + 网络处理。dot-source 后函数与脚本共享同一 script 作用域，
+# 因此 lib/net.ps1 里的 $UseMirror / $ProxyAddr 等状态在本脚本主流程里也能直接读到。
+. (Join-Path $PSScriptRoot 'lib\common.ps1')
+. (Join-Path $PSScriptRoot 'lib\net.ps1')
+
 
 # ---------------------------------------------------------------------------
 # 通用：在 PowerShell 5.1 子进程里执行脚本块（Appx 模块只能在 5.1 用）
@@ -137,177 +138,12 @@ function Invoke-InPS51 {
     }
 }
 
-function Get-MirrorUrl {
-    # gh-proxy 不只代理 github.com，api.github.com / raw.githubusercontent.com /
-    # codeload.github.com 也都通（实测三个域名都能拿到 200）。
-    # 无代理环境下这几个域名直连基本不可用，统一改写到镜像。
-    param([string]$Url)
-    if (-not $script:UseMirror) { return $null }
-    if ($Url -notmatch '^https://(github\.com|api\.github\.com|raw\.githubusercontent\.com|codeload\.github\.com)/') { return $null }
-    return 'https://gh-proxy.com/' + $Url
-}
-
-function Invoke-GitHubApi {
-    # 查 GitHub 最新 release。无代理时直连 api.github.com 基本不通，镜像优先；
-    # 有代理时直连优先、镜像兜底。失败两次才抛，让调用方走内置版本号。
-    param([string]$Url)
-    $mirror = Get-MirrorUrl -Url $Url
-    $order  = @()
-    if ($mirror) {
-        if ($script:ProxyAddr) { $order = @($Url, $mirror) } else { $order = @($mirror, $Url) }
-    } else {
-        $order = @($Url)
-    }
-
-    $last = $null
-    foreach ($u in $order) {
-        try {
-            return Invoke-RestMethod -Uri $u -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
-        } catch { $last = $_ }
-    }
-    throw $last
-}
-
-function Get-RemoteFile {
-    param([string]$Uri, [string]$OutFile)
-    # 国内直连 GitHub 常年龟速甚至挂死（慢但不报错，超时兜不住），
-    # 所以 GitHub 链接优先走加速镜像，失败再回退直连。
-    # 下载统一交给系统自带的 curl.exe：Invoke-WebRequest 在 5.1 下处理
-    # 这种大文件 + 镜像分块响应会挂死。代理环境的证书链不被 curl 自带
-    # CA 认可，故用 -k 跳过校验（只影响本次下载，不改变系统信任设置）。
-    $mirror = Get-MirrorUrl -Url $Uri
-
-    $attempts = @()
-    if ($mirror) {
-        # 有可用代理时直连就够快，镜像留作兜底；没有代理才让镜像打头
-        if ($script:ProxyAddr) { $attempts += $Uri; $attempts += $mirror }
-        else { $attempts += $mirror; $attempts += $Uri }
-    } else {
-        $attempts += $Uri
-    }
-
-    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    $last = $null
-    foreach ($u in $attempts) {
-        try {
-            if (Test-Path $curl) {
-                & $curl -k -L -s --fail --retry 2 --connect-timeout 20 -o $OutFile $u
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and (Get-Item $OutFile).Length -gt 0) { return }
-                throw "curl 退出码 $LASTEXITCODE"
-            }
-            Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
-            return
-        } catch {
-            $last = $_
-            Write-Note "下载失败，换备用源重试：$($_.Exception.Message)"
-        }
-    }
-    throw $last
-}
-
 # ---------------------------------------------------------------------------
-# 网络：有本地代理就用代理，没有就走镜像
-#
-# 现实情况是「代理只在自己机器上有，而且不是常开」。所以不能把代理写死进
-# 任何配置——一旦写死，换台机器或关掉代理，所有下载都会卡住。
-# 这里只在本次运行内用环境变量带代理（git/curl/scoop 都认），进程结束就没了。
+# 网络处理：已抽到 lib/net.ps1（Get-MirrorUrl / Invoke-GitHubApi / Get-RemoteFile /
+# Get-ProxyCandidate / Test-ProxyAlive / Initialize-Network / Get-BucketSource）。
+# 三个脚本共用同一份实现，避免三处各改各的、越走越远。
 # ---------------------------------------------------------------------------
-$script:UseMirror = $false
-$script:ProxyAddr = $null
 
-function Get-ProxyCandidate {
-    # 显式参数优先
-    if ($Proxy) { return $Proxy }
-
-    # 环境变量（git/curl 本来就认）
-    foreach ($v in 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy') {
-        $val = [Environment]::GetEnvironmentVariable($v)
-        if ($val) { return ($val -replace '^https?://', '') }
-    }
-
-    # 系统代理设置
-    try {
-        $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
-        if ($p.ProxyServer) {
-            $s = [string]$p.ProxyServer
-            if ($s -match '=') {
-                $m = [regex]::Match($s, 'https?=([^;]+)')
-                if ($m.Success) { return $m.Groups[1].Value.Trim() }
-            }
-            return $s.Trim()
-        }
-    } catch { }
-    return $null
-}
-
-function Test-ProxyAlive {
-    # 不能只看 ProxyEnable：常见情况是代理软件关掉了、注册表里还留着上次的
-    # 地址，或者代理在跑、系统代理开关却是关的。只能实测。
-    # 也不能只测端口：端口开着不代表能出去（可能只代理内网、或要认证、
-    # 或像某些工具注入的代理一样连不上 GitHub）。所以再做一次真实请求。
-    param([string]$Addr)
-    if (-not $Addr) { return $false }
-
-    $hp = ($Addr -replace '^https?://', '').TrimEnd('/')
-    $parts = $hp.Split(':')
-    $h = $parts[0]
-    $port = 80
-    if ($parts.Count -gt 1) { [void][int]::TryParse($parts[1], [ref]$port) }
-    if (-not $h -or $port -le 0) { return $false }
-
-    # 第一步：端口通不通（快速排除没启动的）
-    $client = New-Object Net.Sockets.TcpClient
-    try {
-        $ar = $client.BeginConnect($h, $port, $null, $null)
-        if (-not $ar.AsyncWaitHandle.WaitOne(800)) { return $false }
-        $client.EndConnect($ar)
-    } catch {
-        return $false
-    } finally {
-        $client.Close()
-    }
-
-    # 第二步：能不能真的到 GitHub
-    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    if (-not (Test-Path $curl)) { return $true }
-    $probe = Join-Path $env:TEMP ("proxyprobe-" + [guid]::NewGuid().ToString('N') + ".txt")
-    try {
-        $code = & $curl -k -s -o $probe -w '%{http_code}' -x "http://$hp" --max-time 10 https://github.com 2>$null
-        return ("$code" -match '^[23]')
-    } catch {
-        return $false
-    } finally {
-        Remove-Item $probe -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Initialize-Network {
-    $cand = Get-ProxyCandidate
-    if ($cand -and (Test-ProxyAlive -Addr $cand)) {
-        $script:ProxyAddr = $cand
-        $env:HTTP_PROXY  = "http://$cand"
-        $env:HTTPS_PROXY = "http://$cand"
-        Write-Ok "检测到可用代理 $cand，本次运行的下载都走它"
-        return
-    }
-
-    $script:UseMirror = $true
-    if ($cand) {
-        Write-Note "代理 $cand 连不上（可能没开），改用 gh-proxy 镜像"
-    } else {
-        Write-Note '本机没有代理，GitHub 相关操作走 gh-proxy 镜像'
-    }
-    Write-Note '镜像只影响本次运行，不会写进任何配置文件'
-}
-
-function Get-BucketSource {
-    # 没有代理时，bucket 的 git clone 也走镜像（gh-proxy 支持 git 协议）
-    param([string]$Source)
-    if ($script:UseMirror -and $Source -like 'https://github.com/*') {
-        return 'https://gh-proxy.com/' + $Source
-    }
-    return $Source
-}
 
 # ---------------------------------------------------------------------------
 # 1. 检测 Windows Terminal 是否安装，没有就装
@@ -993,7 +829,7 @@ if ($Verify) {
 }
 
 Write-Step '检查网络'
-Initialize-Network
+Initialize-Network -Proxy $Proxy
 
 # 先读清单，决定到底需不需要 winget。
 # 清单里没有 winget 条目时，本机就只保留 scoop 一套工具链，不白下 300 MB。
