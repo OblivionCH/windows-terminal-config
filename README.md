@@ -104,7 +104,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 
 - bucket 的 `git clone` 走 `https://gh-proxy.com/https://github.com/...`（实测支持 git 协议）
 - 脚本自己的下载走镜像，失败回退直连
+- 查最新版本用的 `api.github.com`、取 `install.ps1` 用的 `raw.githubusercontent.com` 也一并改写（实测这两个域名走 gh-proxy 都返回 200）。**这一步是必须的**：没有代理时直连 `api.github.com` 基本不通，只镜像 `github.com` 的话，装 winget / git / Windows Terminal 时查版本会静默退回内置版本号
+- 装 scoop 时先试官方 `get.scoop.sh`，失败就从镜像拉 `ScoopInstaller/Install` 的 `install.ps1` 直接跑
 - 导出的 `packages.json` 会把镜像前缀剥掉，不会把镜像地址固化进仓库
+
+`sync.ps1` 也一样：`git pull` / `push` 直连失败后会自动用 git 的进程级 `insteadOf` 改走镜像重试一次，不需要手工设代理。
 
 手动指定：`.\setup.ps1 -Proxy 127.0.0.1:7897`。
 

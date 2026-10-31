@@ -137,6 +137,37 @@ function Invoke-InPS51 {
     }
 }
 
+function Get-MirrorUrl {
+    # gh-proxy 不只代理 github.com，api.github.com / raw.githubusercontent.com /
+    # codeload.github.com 也都通（实测三个域名都能拿到 200）。
+    # 无代理环境下这几个域名直连基本不可用，统一改写到镜像。
+    param([string]$Url)
+    if (-not $script:UseMirror) { return $null }
+    if ($Url -notmatch '^https://(github\.com|api\.github\.com|raw\.githubusercontent\.com|codeload\.github\.com)/') { return $null }
+    return 'https://gh-proxy.com/' + $Url
+}
+
+function Invoke-GitHubApi {
+    # 查 GitHub 最新 release。无代理时直连 api.github.com 基本不通，镜像优先；
+    # 有代理时直连优先、镜像兜底。失败两次才抛，让调用方走内置版本号。
+    param([string]$Url)
+    $mirror = Get-MirrorUrl -Url $Url
+    $order  = @()
+    if ($mirror) {
+        if ($script:ProxyAddr) { $order = @($Url, $mirror) } else { $order = @($mirror, $Url) }
+    } else {
+        $order = @($Url)
+    }
+
+    $last = $null
+    foreach ($u in $order) {
+        try {
+            return Invoke-RestMethod -Uri $u -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+        } catch { $last = $_ }
+    }
+    throw $last
+}
+
 function Get-RemoteFile {
     param([string]$Uri, [string]$OutFile)
     # 国内直连 GitHub 常年龟速甚至挂死（慢但不报错，超时兜不住），
@@ -144,8 +175,7 @@ function Get-RemoteFile {
     # 下载统一交给系统自带的 curl.exe：Invoke-WebRequest 在 5.1 下处理
     # 这种大文件 + 镜像分块响应会挂死。代理环境的证书链不被 curl 自带
     # CA 认可，故用 -k 跳过校验（只影响本次下载，不改变系统信任设置）。
-    $mirror = $null
-    if ($Uri -like 'https://github.com/*') { $mirror = 'https://gh-proxy.com/' + $Uri }
+    $mirror = Get-MirrorUrl -Url $Uri
 
     $attempts = @()
     if ($mirror) {
@@ -351,8 +381,7 @@ function Ensure-Winget {
     try {
         # 查最新版本；API 不通时回退到内置版本号
         try {
-            $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
-                -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+            $rel = Invoke-GitHubApi -Url 'https://api.github.com/repos/microsoft/winget-cli/releases/latest'
             $bundleAsset = $rel.assets | Where-Object { $_.name -like '*8wekyb3d8bbwe.msixbundle' } | Select-Object -First 1
             $depsAsset   = $rel.assets | Where-Object { $_.name -eq 'DesktopAppInstaller_Dependencies.zip' } | Select-Object -First 1
             if ($bundleAsset) { $bundleUrl = $bundleAsset.browser_download_url }
@@ -406,6 +435,9 @@ function Ensure-Scoop {
     }
 
     Write-Note '未检测到 scoop，开始自动安装'
+
+    # 首选官方一行命令。get.scoop.sh 只是个跳板，最终还是要拉 GitHub 上的
+    # install.ps1，国内直连经常不通，所以失败后改从镜像下载 install.ps1 再跑。
     try {
         $code = @'
 $ErrorActionPreference = "Stop"
@@ -418,7 +450,21 @@ Invoke-Expression (New-Object Net.WebClient).DownloadString("https://get.scoop.s
     }
 
     # 刷新当前会话 PATH，让新装的 scoop 立即可见
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    Refresh-SessionPath
+
+    if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+        Write-Note '官方脚本没装成，改用镜像下载 install.ps1'
+        $tmp = Join-Path $env:TEMP 'scoop-install.ps1'
+        try {
+            Get-RemoteFile -Uri 'https://raw.githubusercontent.com/ScoopInstaller/Install/master/install.ps1' -OutFile $tmp
+            & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $tmp 2>&1 | Out-Null
+        } catch {
+            Write-Note "镜像安装也失败：$($_.Exception.Message)"
+        } finally {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        }
+        Refresh-SessionPath
+    }
 
     if (Get-Command scoop -ErrorAction SilentlyContinue) {
         Write-Ok 'scoop 安装完成'
@@ -543,8 +589,7 @@ function Ensure-Git {
     # 回退：MinGit 便携版，免安装免管理员
     Write-Note '改用 MinGit 便携版'
     try {
-        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' `
-            -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+        $rel = Invoke-GitHubApi -Url 'https://api.github.com/repos/git-for-windows/git/releases/latest'
         $asset = $rel.assets | Where-Object { $_.name -like 'MinGit-*-64-bit.zip' } | Select-Object -First 1
         if (-not $asset) { throw '未找到 MinGit 资源' }
 
@@ -647,9 +692,10 @@ function Install-ScoopPackages {
     $adir = Join-Path (Get-ScoopRoot) 'apps'
     $have = @()
     if (Test-Path $adir) {
-        # 有 current 链接才算真装上了（装失败的残留只有版本目录）
+        # 有 current 链接才算真装上了（装失败的残留只有版本目录）。
+        # apps 里还住着 scoop 自己，别算进"已装软件"里
         $have = @(Get-ChildItem $adir -Directory -ErrorAction SilentlyContinue |
-                  Where-Object { Test-Path (Join-Path $_.FullName 'current') } |
+                  Where-Object { $_.Name -ne 'scoop' -and (Test-Path (Join-Path $_.FullName 'current')) } |
                   Select-Object -ExpandProperty Name)
     }
 
@@ -671,8 +717,10 @@ function Install-ScoopPackages {
         $i++
         Write-Host ("    [{0}/{1}] {2}" -f $i, $todo.Count, $a) -ForegroundColor DarkGray
         $log = & scoop install $a 2>&1 | Out-String
-        # 装没装上看 current 链接，不看退出码（scoop 是 PS 函数，退出码不可靠）
-        if (-not (Test-Path (Join-Path $adir $a))) {
+        # 装没装上看 current 链接，不看退出码（scoop 是 PS 函数，退出码不可靠）。
+        # 注意不能只判 apps\<name> 目录存不存在——装失败同样会留下版本目录，
+        # 那样会把 gh / zstd 这类失败品报成成功。
+        if (-not (Test-Path (Join-Path $adir "$a\current"))) {
             $failed += $a
             $tail = ($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' / '
             if ($tail) { Write-Host "        $tail" -ForegroundColor DarkYellow }
@@ -885,7 +933,7 @@ function Install-WindowsTerminal {
     Write-Note '从 GitHub 下载官方安装包'
     try {
         $api = 'https://api.github.com/repos/microsoft/terminal/releases/latest'
-        $rel = Invoke-RestMethod -Uri $api -TimeoutSec 60 -Headers @{ 'User-Agent' = 'wt-config-setup' }
+        $rel = Invoke-GitHubApi -Url $api
         $asset = $rel.assets | Where-Object { $_.name -like '*8wekyb3d8bbwe.msixbundle' } | Select-Object -First 1
         if (-not $asset) { throw '未找到 msixbundle 资源' }
 
