@@ -17,10 +17,6 @@
       "source": "https://github.com/ScoopInstaller/Main"
     },
     {
-      "name": "nerd-fonts",
-      "source": "https://github.com/matthewjberger/scoop-nerd-fonts"
-    },
-    {
       "name": "nirsoft",
       "source": "https://github.com/ScoopInstaller/Nirsoft"
     },
@@ -36,8 +32,6 @@
   "scoop": [
     "7zip",
     "aria2",
-    "CascadiaCode-NF",
-    "CascadiaCode-NF-Mono",
     "dismplusplus",
     "ditto",
     "fastcopy",
@@ -53,7 +47,6 @@
     "llvm",
     "localsend",
     "MKVToolNix",
-    "Mononoki-NF",
     "motrix",
     "mpc-hc",
     "n-m3u8dl-cli",

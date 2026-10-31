@@ -40,8 +40,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 1. **winget** —— 没有就自动下载安装（msixbundle + VCLibs 依赖，用 5.1 的 Appx 装）
 2. **git** —— 没有就先装。scoop 的 bucket 本质是 git 仓库，没 git 连 bucket 都加不了
 3. **scoop** —— 没有就自动安装，并把仓库里的配置合并进去（只补缺失项，不动本机已有的 token / proxy）
-4. **scoop bucket** —— 按清单配齐 8 个：`main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `nerd-fonts` / `dorado` / `java`，不用手动一个个 `bucket add`。已存在的会顺手核对地址（仓库搬家后自动改 remote）
-5. **scoop 软件** —— 装清单里的 44 个命令行工具和应用，已装的自动跳过
+4. **scoop bucket** —— 按清单配齐 7 个：`main` / `extras` / `versions` / `nirsoft` / `sysinternals` / `dorado` / `java`，不用手动一个个 `bucket add`。已存在的会顺手核对地址（仓库搬家后自动改 remote）
+5. **scoop 软件** —— 装清单里的 41 个命令行工具和应用，已装的自动跳过
 6. **winget 软件** —— 装 scoop 里没有的 25 个（浏览器、微信生态、办公、驱动类工具等）
 7. **Windows Terminal** —— 没装就自动安装。优先 winget，回退官方 msixbundle
 8. **定位配置目录** —— Store 版 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState`，预览版走 `...TerminalPreview...`，非 Store 便携版走 `%LOCALAPPDATA%\Microsoft\Windows Terminal`
@@ -68,7 +68,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 - **`scoop`** —— scoop 能覆盖的全部走这里，安装到 `%SCOOP%`，不需要管理员权限
 - **`winget`** —— scoop 里没有的走 winget，覆盖浏览器、微信/飞书/豆包、PDF24、Quicker 这类
 
-### 配了哪 8 个 bucket
+### 配了哪 7 个 bucket
 
 | bucket | 用途 |
 | --- | --- |
@@ -77,11 +77,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dotfiles\w
 | `versions` | 同一软件的多版本（`python@3.9` 这种写法） |
 | `nirsoft` | NirSoft 那套小工具 |
 | `sysinternals` | 微软 Sysinternals 全套 |
-| `nerd-fonts` | Nerd Font 字体（CascadiaCode-NF、Mononoki-NF） |
 | `dorado` | 中文软件：QQ NT、网易云、钉钉、飞书、企业微信、阿里云盘、B 站 |
 | `java` | 多版本 JDK：Temurin、Zulu、Corretto、GraalVM |
 
 **为什么不放 `kkzzhizhou/scoop-apps`**：那个聚合库有 14903 个 manifest、33.7 MB，是其他所有 bucket 加起来的三倍多，但实际只贡献了 4 个包（Bandicam、Dropbox、PixPin、TIM）。其中 PixPin 在 `dorado` 里就有，另外 3 个改走 winget 了，而且它和 dorado 已经出现同名包冲突。删掉之后 `scoop update` 明显变快。要装回来一条命令：`scoop bucket add apps https://github.com/kkzzhizhou/scoop-apps`。
+
+**为什么不放 `nerd-fonts`**：这个 bucket 有 367 个 manifest，全是各种 Nerd Font 变体。配置里只用到 `MesloLGLDZ Nerd Font Mono` 一个族，而 4 个 ttf 已经随仓库内置（`assets/fonts/`），装字体根本不经过 scoop。之前清单里那三个 `CascadiaCode-NF` / `CascadiaCode-NF-Mono` / `Mononoki-NF` 一共 206 MB，配置里一次都没引用过，已移除。要装某个 Nerd Font 时再加：`scoop bucket add nerd-fonts`。
 
 **判断"装没装"的方式**：scoop 侧看 `%SCOOP%\apps\<名字>\current` 这个链接在不在（装失败只留版本目录、没有 `current`）；winget 侧用 `--no-upgrade` 让 winget 自己判断，已装会返回 97 或 `0x8A150061` 直接跳过。
 
